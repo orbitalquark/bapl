@@ -2,6 +2,9 @@ local lpeg = require('lpeg')
 local pt = require('pt')
 local P, S, R, V = lpeg.P, lpeg.S, lpeg.R, lpeg.V
 local C, Ct = lpeg.C, lpeg.Ct
+local locale = lpeg.locale()
+local space, alpha, alnum, digit, xdigit = locale.space^0, locale.alpha, locale.alnum, locale.digit,
+  locale.xdigit
 
 -- ===============================================================================================--
 -- Parser.
@@ -16,16 +19,6 @@ end
 local function node_print(expr) return {tag = 'print', expr = expr} end
 local function node_return(expr) return {tag = 'return', expr = expr} end
 
-local space = S(' \t\r\n')^0
-
-local identifier = C((R('az') + '_') * (R('az', 'AZ', '09') + '_')^0) * space
-local variable = identifier / node_var
-
-local hex_num = '0' * S('xX') * R('09', 'AF', 'af')^1
-local digits = R('09')^1
-local dec_num = digits * ('.' * digits)^-1 * (S('eE') * S('+-')^-1 * digits)^-1
-local numeral = (hex_num + dec_num) / node_num * space
-
 local lparen = '(' * space
 local rparen = ')' * space
 local lbrace = '{' * space
@@ -35,12 +28,6 @@ local semicolon = ';' * space
 local at = '@' * space
 
 local ret = 'return' * space
-
-local op_add = C(S('+-')) * space
-local op_mul = C(S('*/%')) * space
-local op_exp = C(S('^')) * space
-local op_un = C(S('-')) * space
-local op_cmp = C(P('>=') + '>' + '<=' + '<' + '==' + '!=') * space
 
 local function fold_binop(list)
   local tree = list[1]
@@ -60,20 +47,32 @@ local function fold_unop(list) return {tag = 'unop', op = list[1], left = list[2
 
 local grammar = space * P{
   'stats',
-  --
+  -- Basic patterns.
+  identifier = C((alpha + '_') * (alnum + '_')^0) * space, --
+  variable = V('identifier') / node_var, --
+  hex_num = '0' * S('xX') * xdigit^1,
+  dec_num = digit^1 * ('.' * digit^1)^-1 * (S('eE') * S('+-')^-1 * digit^1)^-1,
+  numeral = (V('hex_num') + V('dec_num')) / node_num * space,
+  -- Operators.
+  op_add = C(S('+-')) * space, --
+  op_mul = C(S('*/%')) * space, --
+  op_exp = C(S('^')) * space, --
+  op_un = C(S('-')) * space, --
+  op_cmp = C(P('>=') + '>' + '<=' + '<' + '==' + '!=') * space,
+  -- Statements.
   stats = V('stat') * (semicolon^1 * V('stats'))^-1 / node_seq,
   block = lbrace * V('stats') * semicolon^-1 * rbrace,
   stat = V('block') + V('assign') + V('print') + V('return'),
-  assign = identifier * equals * V('expr') / node_assign, --
+  assign = V('identifier') * equals * V('expr') / node_assign, --
   print = at * V('expr') / node_print, --
   ['return'] = ret * V('expr') / node_return,
-  --
-  primary = variable + numeral + lparen * V('expr') * rparen + V('unary'),
-  unary = Ct(op_un * V('exp')) / fold_unop,
-  exp = Ct(V('primary') * (op_exp * V('primary'))^0) / fold_binop_rassoc,
-  mul = Ct(V('exp') * (op_mul * V('exp'))^0) / fold_binop,
-  add = Ct(V('mul') * (op_add * V('mul'))^0) / fold_binop,
-  cmp = Ct(V('add') * (op_cmp * V('add'))^0) / fold_binop, --
+  -- Expressions.
+  primary = V('variable') + V('numeral') + lparen * V('expr') * rparen + V('unary'),
+  unary = Ct(V('op_un') * V('exp')) / fold_unop,
+  exp = Ct(V('primary') * (V('op_exp') * V('primary'))^0) / fold_binop_rassoc,
+  mul = Ct(V('exp') * (V('op_mul') * V('exp'))^0) / fold_binop,
+  add = Ct(V('mul') * (V('op_add') * V('mul'))^0) / fold_binop,
+  cmp = Ct(V('add') * (V('op_cmp') * V('add'))^0) / fold_binop, --
   expr = V('cmp')
 } * -1
 

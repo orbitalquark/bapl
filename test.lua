@@ -46,6 +46,7 @@ test_expr('-(1+2)')
 test_expr('-1+2')
 test_expr('-(1-2)*-3*(4/5)')
 test_expr('-2^2')
+test_expr('2^-2')
 
 -- Test comparisons.
 test_expr('1==1', 1)
@@ -63,6 +64,10 @@ test_stat('_abc123=1;;return _abc123', 1)
 -- Test blocks.
 test_stat(' { x = 1 ; } ; { y = 2 } ; ; { return x + y } ', 3)
 test_stat('x=1;{y=2;;return x+y}', 3)
+test_stat([[
+x = 1;
+y = 2;
+return x + y]], 3)
 
 -- Test print statement.
 test_stat('@(2*2)', 0)
