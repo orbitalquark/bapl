@@ -1,84 +1,141 @@
 local lpeg = require('lpeg')
 local pt = require('pt')
-local P, S, R, V = lpeg.P, lpeg.S, lpeg.R, lpeg.V
-local C, Ct = lpeg.C, lpeg.Ct
+local P, S, V = lpeg.P, lpeg.S, lpeg.V
+local C, Cc, Cf, Cg, Cmt, Ct = lpeg.C, lpeg.Cc, lpeg.Cf, lpeg.Cg, lpeg.Cmt, lpeg.Ct
 local locale = lpeg.locale()
-local space, alpha, alnum, digit, xdigit = locale.space^0, locale.alpha, locale.alnum, locale.digit,
-  locale.xdigit
+local alpha, alnum, digit, xdigit = locale.alpha, locale.alnum, locale.digit, locale.xdigit
 
 -- ===============================================================================================--
 -- Parser.
 
-local function node_var(id) return {tag = 'variable', value = id} end
-local function node_num(num) return {tag = 'number', value = tonumber(num)} end
-local function node_assign(id, expr) return {tag = 'assign', id = id, expr = expr} end
-local function node_seq(left, right)
-  if not right then return left end
-  return {tag = 'seq', left = left, right = right}
-end
-local function node_print(expr) return {tag = 'print', expr = expr} end
-local function node_return(expr) return {tag = 'return', expr = expr} end
+-- Language grammar.
+local grammar = {}
 
-local lparen = '(' * space
-local rparen = ')' * space
-local lbrace = '{' * space
-local rbrace = '}' * space
-local equals = '=' * space
-local semicolon = ';' * space
-local at = '@' * space
+---
+-- Creates a new language grammar.
+-- @usage ast = grammar.new():parse(input)
+function grammar.new() return setmetatable({}, {__index = grammar}) end
 
-local ret = 'return' * space
-
-local function fold_binop(list)
-  local tree = list[1]
-  for i = 2, #list, 2 do tree = {tag = 'binop', left = tree, op = list[i], right = list[i + 1]} end
-  return tree
-end
-
-local function fold_binop_rassoc(list)
-  local tree = list[#list]
-  for i = #list - 1, 2, -2 do
-    tree = {tag = 'binop', right = tree, op = list[i], left = list[i - 1]}
+-- Initializes the grammar pattern.
+function grammar:_init()
+  self._space = V('space')
+  -- Convenience functions.
+  local function token(char) return char * self._space end
+  local function node(tag, patt) return Ct(Cg(Cc(tag), 'tag') * patt) * self._space end
+  local function reserved(...) return self:_reserved(...) end
+  local function op(patt) return Cg(C(patt), 'op') * self._space end
+  -- Folds a left-associative binary operator.
+  function fold_binop(tree, new)
+    return {tag = 'binop', left = tree, op = new.op, right = new.right}
   end
-  return tree
+  -- Folds a right-associative list of binary operations.
+  function fold_binop_rassoc(list)
+    local tree = list[#list]
+    for i = #list - 1, 2, -2 do
+      tree = {tag = 'binop', right = tree, op = list[i], left = list[i - 1]}
+    end
+    return tree
+  end
+  -- Folds an if-elseif-else statement, with elseif being optional.
+  -- if {...} elseif {...} is transformed into if {...} else { if {...} }.
+  -- Note: an if by itself does not need folding.
+  function fold_if(tree, new)
+    local node = tree
+    while node.block_else do node = node.block_else end
+    node.block_else = new.tag == 'if' and new or new.block
+    return tree
+  end
+
+  self._grammar = P{
+    V('reset_pos') * self._space * V('stats') * -1,
+
+    -- Whitespace and comments.
+    space = (locale.space + V('comment'))^0 * V('save_pos'),
+    comment = '#{' * (P(1) - '#}')^0 * '#}' + '#' * (P(1) - '\n')^0,
+    -- comment = node('comment', Cg('#{' * (P(1) - '#}')^0 * '#}' + '#' * (P(1) - '\n')^0, 'text')),
+    
+    -- Basic patterns.
+    identifier = Cg(Cmt((alpha + '_') * (alnum + '_')^0, self:_non_reserved()), 'id') * self._space,
+    variable = node('variable', V('identifier')), --
+    hex_num = '0' * S('xX') * xdigit^1,
+    dec_num = digit^1 * ('.' * digit^1)^-1 * (S('eE') * S('+-')^-1 * digit^1)^-1,
+    numeral = node('number', Cg((V('hex_num') + V('dec_num')) / tonumber, 'value')),
+
+    -- Statements.
+    stats = node('seq', Cg(V('stat'), 'left') * (token(';')^1 * Cg(V('stats'), 'right'))) +
+      V('stat'), --
+    block = token('{') * V('stats') * token(';')^-1 * token('}'),
+    stat = V('block') + V('if') + V('while') + V('assign') + V('print') + V('return'),
+    ['if'] = Cf(node('if', reserved('if') * Cg(V('expr'), 'cond') * Cg(V('block'), 'block')) *
+      (node('if', reserved('elseif') * Cg(V('expr'), 'cond') * Cg(V('block'), 'block')))^0 *
+      (node('else', reserved('else') * Cg(V('block'), 'block')))^-1, fold_if),
+    ['while'] = node('while', reserved('while') * Cg(V('expr'), 'cond') * Cg(V('block'), 'block')),
+    assign = node('assign', V('identifier') * token('=') * Cg(V('expr'), 'expr')),
+    print = node('print', token('@') * Cg(V('expr'), 'expr')),
+    ['return'] = node('return', reserved('return') * Cg(V('expr'), 'expr')),
+
+    -- Operators.
+    op_exp = C(S('^')) * self._space,
+
+    -- Expressions.
+    primary = V('variable') + V('numeral') + token('(') * V('expr') * token(')') + V('unary'),
+    unary = node('unop', op(S('-!')) * Cg(V('exp'), 'left')),
+    exp = Ct(V('primary') * (V('op_exp') * V('primary'))^0) / fold_binop_rassoc,
+    mul = Cf(V('exp') * Ct(op(S('*/%')) * Cg(V('exp'), 'right'))^0, fold_binop),
+    add = Cf(V('mul') * Ct(op(S('+-')) * Cg(V('mul'), 'right'))^0, fold_binop),
+    cmp = Cf(V('add') * Ct(op(P('>=') + '>' + '<=' + '<' + '==' + '!=') * Cg(V('add'), 'right'))^0,
+      fold_binop), --
+    expr = V('cmp'),
+
+    -- Utility.
+    reset_pos = P(function()
+      self._max_pos = 0
+      return true
+    end), --
+    save_pos = P(function(_, i)
+      self._max_pos = math.max(self._max_pos, i)
+      return true
+    end)
+  }
 end
 
-local function fold_unop(list) return {tag = 'unop', op = list[1], left = list[2]} end
+-- Reserves the given word and returns a pattern that matches it.
+-- This is to be used when constructing the grammar in `_init()`.
+-- @param word Word to reserve and return a matching pattern for.
+-- @see _init
+function grammar:_reserved(word)
+  if not self._reserved_words then self._reserved_words = {} end
+  self._reserved_words[word] = true
+  return word * -alnum * self._space
+end
 
-local grammar = space * P{
-  'stats',
-  -- Basic patterns.
-  identifier = C((alpha + '_') * (alnum + '_')^0) * space, --
-  variable = V('identifier') / node_var, --
-  hex_num = '0' * S('xX') * xdigit^1,
-  dec_num = digit^1 * ('.' * digit^1)^-1 * (S('eE') * S('+-')^-1 * digit^1)^-1,
-  numeral = (V('hex_num') + V('dec_num')) / node_num * space,
-  -- Operators.
-  op_add = C(S('+-')) * space, --
-  op_mul = C(S('*/%')) * space, --
-  op_exp = C(S('^')) * space, --
-  op_un = C(S('-')) * space, --
-  op_cmp = C(P('>=') + '>' + '<=' + '<' + '==' + '!=') * space,
-  -- Statements.
-  stats = V('stat') * (semicolon^1 * V('stats'))^-1 / node_seq,
-  block = lbrace * V('stats') * semicolon^-1 * rbrace,
-  stat = V('block') + V('assign') + V('print') + V('return'),
-  assign = V('identifier') * equals * V('expr') / node_assign, --
-  print = at * V('expr') / node_print, --
-  ['return'] = ret * V('expr') / node_return,
-  -- Expressions.
-  primary = V('variable') + V('numeral') + lparen * V('expr') * rparen + V('unary'),
-  unary = Ct(V('op_un') * V('exp')) / fold_unop,
-  exp = Ct(V('primary') * (V('op_exp') * V('primary'))^0) / fold_binop_rassoc,
-  mul = Ct(V('exp') * (V('op_mul') * V('exp'))^0) / fold_binop,
-  add = Ct(V('mul') * (V('op_add') * V('mul'))^0) / fold_binop,
-  cmp = Ct(V('add') * (V('op_cmp') * V('add'))^0) / fold_binop, --
-  expr = V('cmp')
-} * -1
+-- Returns a function that validates a captured word as non-reserved.
+-- This is to be used in conjunction with `lpeg.Cmt()` when constructing the grammar in `_init()`.
+-- @see _init
+function grammar:_non_reserved()
+  return function(_, _, word)
+    if self._reserved_words[word] then return false end
+    return true, word
+  end
+end
 
+---
 -- Parses the given input and returns the resulting Abstract Syntax Tree.
+-- Raises an error if a syntax error was encountered.
 -- @param input String input to parse.
-local function parse(input) return grammar:match(input) end
+function grammar:parse(input)
+  if not self._grammar then self:_init() end
+  local ast = self._grammar:match(input)
+  if not ast then
+    local parsed = input:sub(1, self._max_pos - 1)
+    if parsed:find('\n$') then parsed = parsed:sub(1, -2) end -- chomp
+    local line = select(2, parsed:gsub('\n', '\n')) + 1
+    local s, e = parsed:find('[^\n]*$')
+    local col = e - s + 2 -- blame col of next char
+    error(string.format('syntax error at line %d, col %d', line, col))
+  end
+  return ast
+end
 
 -- ===============================================================================================--
 -- Compiler.
@@ -86,13 +143,23 @@ local function parse(input) return grammar:match(input) end
 -- List of opcodes for a stack machine.
 local opcodes = {}
 
--- Creates a new list of opcodes.
-function opcodes.new() return setmetatable({}, {__index = opcodes}) end
+---
+-- Creates a list of opcodes from the given Abstract syntax tree.
+-- @param ast Abstract syntax tree to compile.
+-- @see grammar.parse
+function opcodes.new(ast)
+  local codes = setmetatable({}, {__index = opcodes})
+  codes:_add_stat(ast)
+  -- Add implicit 'return 0' statement
+  codes:_add('push', 0)
+  codes:_add('ret')
+  return codes
+end
 
 -- Adds the given opcode and optional value to the list.
 -- @param op Opcode to add.
 -- @param value Optional value for `op`, such as a number to push or variable to store or load.
-function opcodes:add(op, value)
+function opcodes:_add(op, value)
   table.insert(self, op)
   if value then table.insert(self, value) end
 end
@@ -101,7 +168,7 @@ end
 -- @param id Variable to fetch an ID for.
 -- @param can_create Flag that indicates whether or not an ID can be created. If `false` and
 --  there is no numeric ID is available, raises an error for the undefined variable.
-function opcodes:variable_id(id, can_create)
+function opcodes:_variable_id(id, can_create)
   if not self.vars then self.vars = {} end
   if not self.vars[id] and can_create then
     table.insert(self.vars, id)
@@ -114,47 +181,86 @@ local binops = {
   ['+'] = 'add', ['-'] = 'sub', ['*'] = 'mul', ['/'] = 'div', ['%'] = 'mod', ['^'] = 'pow',
   ['>='] = 'gte', ['>'] = 'gt', ['<='] = 'lte', ['<'] = 'lt', ['=='] = 'eq', ['!='] = 'ne'
 }
-local unops = {['-'] = 'unm'}
+local unops = {['-'] = 'unm', ['!'] = 'not'}
 
 -- Adds the opcodes for the given expression to the list.
--- @param ast Abstract syntax tree of the expression to add.
-function opcodes:add_expr(ast)
-  if ast.tag == 'number' then
-    self:add('push', ast.value)
-  elseif ast.tag == 'variable' then
-    self:add('load', self:variable_id(ast.value))
-  elseif ast.tag == 'binop' then
-    self:add_expr(ast.left)
-    self:add_expr(ast.right)
-    self:add(binops[ast.op])
-  elseif ast.tag == 'unop' then
-    self:add_expr(ast.left)
-    self:add(unops[ast.op])
+-- @param node Abstract syntax tree node of the expression to add.
+function opcodes:_add_expr(node)
+  if node.tag == 'number' then
+    self:_add('push', node.value)
+  elseif node.tag == 'variable' then
+    self:_add('load', self:_variable_id(node.id))
+  elseif node.tag == 'binop' then
+    self:_add_expr(node.left)
+    self:_add_expr(node.right)
+    self:_add(binops[node.op])
+  elseif node.tag == 'unop' then
+    self:_add_expr(node.left)
+    self:_add(unops[node.op])
   else
-    error('invalid tree')
+    error('unknown expr tag: ' .. tag)
   end
+end
+
+-- Starts a forward jump or completes a backward jump.
+-- @param op Jump opcode.
+-- @param id Optional id, returned by `_jump_end()`, for a backward jump.
+-- @see _jump_end
+-- @return id of the jump to pass to `_jump_end()` for a forward jump
+function opcodes:_jump_start(op, id)
+  self:_add(op, not id and 0 or id - #self - 2) -- TODO: why -2?
+  if not id then return #self end
+end
+
+-- Ends a forward jump or starts a backward jump.
+-- @param id Optional id, returned by `_jump_start()`, for a forward jump.
+-- @see _jump_start
+-- @return id of the jump to pass to `_jump_start()` for a backward jump
+function opcodes:_jump_end(id)
+  if not id then return #self end
+  self[id] = #self - id
 end
 
 -- Adds the opcodes for the given statement to the list.
--- @param ast Abstract syntax tree of the statement to add.
-function opcodes:add_stat(ast)
-  if ast.tag == 'assign' then
-    self:add_expr(ast.expr)
-    self:add('store', self:variable_id(ast.id, true))
-  elseif ast.tag == 'seq' then
-    self:add_stat(ast.left)
-    self:add_stat(ast.right)
-  elseif ast.tag == 'print' then
-    self:add_expr(ast.expr)
-    self:add('print')
-  elseif ast.tag == 'return' then
-    self:add_expr(ast.expr)
-    self:add('ret')
+-- @param node Abstract syntax tree node of the statement to add.
+function opcodes:_add_stat(node)
+  if node.tag == 'assign' then
+    self:_add_expr(node.expr)
+    self:_add('store', self:_variable_id(node.id, true))
+  elseif node.tag == 'seq' then
+    self:_add_stat(node.left)
+    self:_add_stat(node.right)
+  elseif node.tag == 'print' then
+    self:_add_expr(node.expr)
+    self:_add('print')
+  elseif node.tag == 'return' then
+    self:_add_expr(node.expr)
+    self:_add('ret')
+  elseif node.tag == 'if' then
+    self:_add_expr(node.cond)
+    local over_if = self:_jump_start('jmpz')
+    self:_add_stat(node.block)
+    if not node.block_else then
+      self:_jump_end(over_if) -- cond was false
+    else
+      local over_else = self:_jump_start('jmp')
+      self:_jump_end(over_if) -- jump into else block (cond was false)
+      self:_add_stat(node.block_else)
+      self:_jump_end(over_else) -- cond was true
+    end
+  elseif node.tag == 'while' then
+    local to_cond = self:_jump_end()
+    self:_add_expr(node.cond)
+    local over_while = self:_jump_start('jmpz')
+    self:_add_stat(node.block)
+    self:_jump_start('jmp', to_cond)
+    self:_jump_end(over_while) -- cond was false
   else
-    error('invalid tree')
+    error('unknown stat tag: ' .. tag)
   end
 end
 
+---
 -- Returns the next opcode or value in the list.
 function opcodes:next()
   if not self.i then self.i = 0 end
@@ -162,16 +268,12 @@ function opcodes:next()
   return self[self.i]
 end
 
--- Compiles the given Abstract Syntax Tree into a list of opcodes and returns them.
--- @param ast Abstract syntax tree to compile.
--- @see parse
-local function compile(ast)
-  local opcodes = opcodes.new()
-  opcodes:add_stat(ast)
-  -- Add implicit 'return 0' statement
-  opcodes:add('push', 0)
-  opcodes:add('ret')
-  return opcodes
+---
+-- Jumps to a relative opcode position in the list.
+-- @param rel Opcode position to jump to, relative to the current position.
+function opcodes:jump(rel)
+  self.i = self.i + rel
+  assert(self.i > 0 and self.i <= self.i, 'invalid jump: ' .. rel)
 end
 
 -- ===============================================================================================--
@@ -200,7 +302,8 @@ local bin_ops = {
 }
 
 local un_ops = {
-  unm = function(a) return -a end --
+  unm = function(a) return -a end, --
+  ['not'] = function(a) return a == 1 and 0 or 1 end
 }
 
 local _print = print -- for @ statement so that it is never silenced.
@@ -211,15 +314,19 @@ local machine = {}
 -- Returns a new stack machine.
 function machine.new() return setmetatable({}, {__index = machine}) end
 
--- Executes the given list of opcodes on this machine.
+-- Executes the given list of opcodes on this machine and returns the result (the value at the
+-- top of the stack).
+-- @param opcodes List of opcodes to execute.
+-- @see opcodes.new
 function machine:run(opcodes)
-  if not self.memory then self.memory = {} end
-  if not self.stack then self.stack = stack.new() end
-  local memory, stack = self.memory, self.stack
+  print(pt.pt(opcodes))
+  if not self._memory then self._memory = {} end
+  if not self._stack then self._stack = stack.new() end
+  local memory, stack = self._memory, self._stack
   while true do
     local opcode = opcodes:next()
     if opcode == 'ret' then
-      return
+      break
     elseif opcode == 'push' then
       local value = opcodes:next()
       print('push', value)
@@ -244,44 +351,47 @@ function machine:run(opcodes)
       local value = stack:pop()
       print('print', value)
       _print(value)
+    elseif opcode == 'jmp' then
+      local rel = opcodes:next()
+      print('jmp', rel)
+      opcodes:jump(rel)
+    elseif opcode == 'jmpz' then
+      local rel = opcodes:next()
+      if stack[#stack] == 0 then -- 0 is a false conditional value
+        print('jmpz', rel)
+        opcodes:jump(rel)
+      end
+      stack:pop()
     else
       error('unknown instruction: ' .. opcode)
     end
   end
-end
-
--- Executes the given list of opcodes on a new stack machine and returns the result (the value at
--- the top of the stack).
--- @param opcodes List of opcodes to execute.
--- @see compile
-local function run(opcodes)
-  local instance = machine.new()
-  instance:run(opcodes)
-  return instance.stack:pop()
+  return stack:pop()
 end
 
 -- ===============================================================================================--
 -- Module.
 
 -- Interpreter module.
--- @field verbose Whether or not print debug info when running. Debug info includes the Abstract
---   Syntax Tree and opcodes.
-local M = {verbose = false}
+local M = {grammar = grammar.new()}
 
 -- Runs the given input code and returns its result.
 -- @param input Input code to run.
-function M.run(input)
+-- @param verbose Optional flag that indicates whether or not print debug info when running. Debug
+--   info includes the Abstract Syntax Tree and opcodes.
+function M.run(input, verbose)
   local _print = print
-  print = function(...) if M.verbose then _print(...) end end
+  print = function(...) if verbose then _print(...) end end
 
   print(input)
-  local ast = parse(input)
-  print(pt.pt(ast))
-  local opcodes = compile(ast)
-  local result = run(opcodes)
+  local ok, result = pcall(function()
+    local ast = M.grammar:parse(input)
+    print(pt.pt(ast))
+    return machine.new():run(opcodes.new(ast))
+  end)
 
   print = _print -- restore
-  return result
+  return assert(ok and result, result)
 end
 
 return M

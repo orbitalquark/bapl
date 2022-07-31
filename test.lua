@@ -3,8 +3,10 @@ local interpreter = require('interpreter')
 -- Tests the given statement returns the given expected value.
 -- @param stat Statement or list of statements to run.
 -- @param expected Value expected to be returned by `stat`.
-local function test_stat(stat, expected)
-  local actual = interpreter.run(stat)
+-- @param verbose Optional flag that indicates whether or not to print debug info.
+local function test_stat(stat, expected, verbose)
+  local actual = interpreter.run(stat, verbose)
+  assert(expected, 'expected result not given')
   assert(actual == expected, string.format("'%s' ~= %f (expected %f)", expr, actual, expected))
 end
 
@@ -12,8 +14,9 @@ end
 -- @param expr Expression to evaluate.
 -- @param expected Optional value expected to be returned by `expr`. If omitted, `expr` is
 --   executed using Lua and its returned value is used for the test.
-function test_expr(expr, expected)
-  test_stat('return ' .. expr, expected or assert(load('return ' .. expr))())
+-- @param verbose Optional flag that indicates whether or not to print debug info.
+function test_expr(expr, expected, verbose)
+  test_stat('return ' .. expr, expected or assert(load('return ' .. expr))(), verbose)
 end
 
 -- Test integers, floats, and hex numbers.
@@ -57,9 +60,18 @@ test_expr('2^2>2^2', 0)
 test_expr('1*2>=8/4', 1)
 test_expr('1!=-1==1', 1)
 
+-- Test unary not.
+test_expr('!1', 0)
+test_expr('!!1', 1)
+test_expr('!0-!0', 0)
+test_expr('!(1+2<3*4)', 0)
+test_expr('!1!=!1', 0)
+
 -- Test simple assignments and return statements.
 test_stat('x=1;return x', 1)
+test_stat('x=1;return(x)', 1)
 test_stat('_abc123=1;;return _abc123', 1)
+-- test_stat('x=y=1;return x', 1)
 
 -- Test blocks.
 test_stat(' { x = 1 ; } ; { y = 2 } ; ; { return x + y } ', 3)
@@ -76,5 +88,65 @@ test_stat('x=-(2*2);@x', 0)
 -- Test use of variables before assignment at compile time.
 local ok, err = pcall(test_stat, 'return 1+y')
 assert(not ok and err:find('undefined variable: y'), 'expected "undefined variable: y"')
+
+-- Test syntax error.
+ok, err = pcall(test_stat, 'oops!')
+assert(not ok and err:find('syntax error at line 1, col 5'))
+ok, err = pcall(test_stat, [[
+x = 1;
+oops!]])
+assert(not ok and err:find('syntax error at line 2, col 5'))
+ok, err = pcall(test_stat, [[
+x = 1;
+y = 2
+return x + y
+]])
+assert(not ok and err:find('syntax error at line 2, col 6'))
+
+-- Test comments.
+test_stat([[
+#{comment
+comment#}
+x = 1; # comment
+# comment
+y = 2;
+return x + y]], 3)
+
+-- Test reserved words.
+ok, err = pcall(test_stat, 'x=1;returnx')
+assert(not ok and err:find('syntax error'))
+ok, err = pcall(test_stat, 'return1')
+assert(not ok and err:find('syntax error'))
+test_stat('returnx=1;return returnx', 1)
+ok, err = pcall(test_stat, 'return=1;return return')
+assert(not ok and err:find('syntax error'))
+
+-- Test if conditionals.
+test_stat('if 1 { return 1 }', 1)
+test_stat('if 0 { return 1 }', 0)
+test_stat('if 1 { return 1 } else { return 2 }', 1)
+test_stat('if 0 { return 1 } else { return 2 }', 2)
+test_stat([[
+a = 2;
+if a == 0 {
+  return 1
+} elseif a == 1 {
+  return 2
+} else {
+  return 3
+}]], 3)
+test_stat(
+  'if 0 { if 1 { return 1 } else { return 2 } } else { if 1 { return 3 } else { return 4} }', 3)
+
+-- Test while.
+test_stat('x = 0; while x < 10 { x = x + 1}; return x', 10)
+test_stat([[
+i = 6;
+factorial = 1;
+while i {
+  factorial = factorial * i;
+  i = i - 1
+};
+return factorial]], 720)
 
 print('Passed')
