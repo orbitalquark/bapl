@@ -23,7 +23,7 @@ function grammar:_init()
   local function token(char) return char * self._space end
   local function node(tag, patt) return Ct(Cg(Cc(tag), 'tag') * patt) * self._space end
   local function reserved(...) return self:_reserved(...) end
-  local function op(patt) return Cg(C(patt), 'op') * self._space end
+  local function binop(patt) return Cg(C(patt), 'op') * self._space end
   local function opnode(tag, left, op, right)
     return {tag = tag, left = left, op = op, right = right}
   end
@@ -33,7 +33,22 @@ function grammar:_init()
   function fold_if(tree, new)
     local node = tree
     while node.block_else do node = node.block_else end
-    node.block_else = new.tag == 'if' and new or new.block
+    if new.tag == 'else' then new = new.block end
+    node.block_else = new
+    return tree
+  end
+  -- Folds a switch-case-else statement into if-elseif-else, with case being optional.
+  -- switch expr; case x {...} case y {...} is transformed into
+  -- if expr == x {...} else { if expr == y {...} }.
+  -- Note: a switch by itself does not need folding; it is a no-op.
+  function fold_switch(tree, new)
+    if new.expr then new.expr = opnode('binop', tree.expr, '==', new.expr) end
+    if tree.body then
+      fold_if(tree.body, new) -- continue if statement
+      return tree
+    end
+    if new.tag == 'else' then new = new.block end
+    tree.body = new -- either {tag = 'if' ... } or statement(s) from else block
     return tree
   end
   -- Folds a left-associative binary operator.
@@ -63,31 +78,32 @@ function grammar:_init()
     numeral = node('number', Cg((V('hex_num') + V('dec_num')) / tonumber, 'value')),
 
     -- Statements.
+    block = token('{') * (V('stats') + node('empty', token(';')^0)) * token('}'),
     stats = node('seq', Cg(V('stat'), 'left') * (token(';')^1 * Cg(V('stats'), 'right'))) +
-      V('stat'), --
-    block = token('{') * V('stats') * token(';')^-1 * token('}'),
-    stat = V('block') + V('if') + V('while') + V('assign') + V('print') + V('return'),
+      V('stat') * token(';')^-1, --
+    stat = V('block') + V('if') + V('switch') + V('while') + V('assign') + V('print') + V('return'),
     ['if'] = Cf(node('if', reserved('if') * Cg(V('expr'), 'expr') * Cg(V('block'), 'block')) *
       (node('if', reserved('elseif') * Cg(V('expr'), 'expr') * Cg(V('block'), 'block')))^0 *
       (node('else', reserved('else') * Cg(V('block'), 'block')))^-1, fold_if),
+    switch = Cf(node('switch', reserved('switch') * Cg(V('expr'), 'expr')) *
+      (node('if', reserved('case') * Cg(V('expr'), 'expr') * Cg(V('block'), 'block')))^0 *
+      (node('else', reserved('else') * Cg(V('block'), 'block')))^-1, fold_switch),
     ['while'] = node('while', reserved('while') * Cg(V('expr'), 'expr') * Cg(V('block'), 'block')),
     assign = node('assign', V('identifier') * token('=') * Cg(V('expr'), 'expr')),
     print = node('print', token('@') * Cg(V('expr'), 'expr')),
     ['return'] = node('return', reserved('return') * Cg(V('expr'), 'expr')),
 
-    -- Operators.
-    op_exp = C(S('^')) * self._space,
-
     -- Expressions in order of precedence.
     primary = V('variable') + V('numeral') + token('(') * V('expr') * token(')') + V('unary'),
-    unary = node('unop', op(S('-!')) * Cg(V('exp'), 'left')),
-    exp = Ct(V('primary') * (V('op_exp') * V('primary'))^0) / fold_binop_rassoc,
-    mul = Cf(V('exp') * Ct(op(S('*/%')) * Cg(V('exp'), 'right'))^0, fold_binop),
-    add = Cf(V('mul') * Ct(op(S('+-')) * Cg(V('mul'), 'right'))^0, fold_binop),
-    cmp = Cf(V('add') * Ct(op(P('>=') + '>' + '<=' + '<' + '==' + '!=') * Cg(V('add'), 'right'))^0,
+    unary = node('unop', binop(S('-!')) * Cg(V('exp'), 'expr')),
+    exp = Ct(V('primary') * (C(S('^')) * self._space * V('primary'))^0) / fold_binop_rassoc,
+    mul = Cf(V('exp') * Ct(binop(S('*/%')) * Cg(V('exp'), 'right'))^0, fold_binop),
+    add = Cf(V('mul') * Ct(binop(S('+-')) * Cg(V('mul'), 'right'))^0, fold_binop),
+    cmp = Cf(
+      V('add') * Ct(binop(P('>=') + '>' + '<=' + '<' + '==' + '!=') * Cg(V('add'), 'right'))^0,
       fold_binop), --
-    land = Cf(V('cmp') * Ct(op('and') * Cg(V('cmp'), 'right'))^0, fold_logop),
-    lor = Cf(V('land') * Ct(op('or') * Cg(V('land'), 'right'))^0, fold_logop), --
+    land = Cf(V('cmp') * Ct(binop('and') * Cg(V('cmp'), 'right'))^0, fold_logop),
+    lor = Cf(V('land') * Ct(binop('or') * Cg(V('land'), 'right'))^0, fold_logop), --
     expr = V('lor'),
 
     -- Utility.
@@ -224,7 +240,7 @@ function opcodes:_add_expr(node)
     self:_add_expr(node.right)
     self:_add(bin_opcodes[node.op])
   elseif node.tag == 'unop' then
-    self:_add_expr(node.left)
+    self:_add_expr(node.expr)
     self:_add(un_opcodes[node.op])
   elseif node.tag == 'logop' then
     self:_add_expr(node.left)
@@ -242,7 +258,7 @@ end
 -- @see _jump_end
 -- @return id of the jump to pass to `_jump_end()` for a forward jump
 function opcodes:_jump_start(op, id)
-  self:_add(op, not id and 0 or id - #self - 2) -- TODO: why -2?
+  self:_add(op, not id and 0 or id - #self - 2) -- extra -2 for this instruction
   if not id then return #self end
 end
 
@@ -283,14 +299,17 @@ function opcodes:_add_stat(node)
       self:_jump_end(over_else) -- expr was true
     end
   elseif node.tag == 'while' then
-    local to_cond = self:_jump_end()
+    local to_expr = self:_jump_end()
     self:_add_expr(node.expr)
     local over_while = self:_jump_start(JMPZ)
     self:_add_stat(node.block)
-    self:_jump_start(JMP, to_cond)
+    self:_jump_start(JMP, to_expr)
     self:_jump_end(over_while) -- expr was false
+  elseif node.tag == 'switch' then
+    if node.body then self:_add_stat(node.body) end
+  elseif node.tag == 'empty' then -- no-op
   else
-    error('unknown stat tag: ' .. tag)
+    error('unknown stat tag: ' .. node.tag)
   end
 end
 
@@ -315,6 +334,7 @@ function opcodes:jump(rel) self.i = self.i + rel end
 local stack = {}
 function stack.new() return setmetatable({}, {__index = stack}) end
 function stack:push(value) table.insert(self, value) end
+function stack:top() return self[#self] end
 function stack:pop() return table.remove(self) end
 
 local bin_ops = {
@@ -334,7 +354,7 @@ local bin_ops = {
 
 local un_ops = {
   [UNM] = function(a) return -a end, --
-  [NOT] = function(a) return a == 1 and 0 or 1 end
+  [NOT] = function(a) return a == 0 and 1 or 0 end
 }
 
 local jump_ops = {[JMP] = true, [JMPZ] = true, [JMPZP] = true, [JMPNZP] = true}
@@ -387,7 +407,7 @@ function machine:run(opcodes)
     elseif jump_ops[opcode] then
       local rel = opcodes:next()
       print(opcode, rel)
-      local zero = stack[#stack] == 0
+      local zero = stack:top() == 0
       local jump = opcode == JMP or ((opcode == JMPZ or opcode == JMPZP) and zero) or
         (opcode == JMPNZP and not zero)
       local pop = opcode == JMPZ or (opcode == JMPZP and not zero) or (opcode == JMPNZP and zero)

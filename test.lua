@@ -62,6 +62,7 @@ test_expr('1!=-1==1', 1)
 
 -- Test unary not.
 test_expr('!1', 0)
+test_expr('!2', 0)
 test_expr('!!1', 1)
 test_expr('!0-!0', 0)
 test_expr('!(1+2<3*4)', 0)
@@ -74,12 +75,13 @@ test_stat('_abc123=1;;return _abc123', 1)
 -- test_stat('x=y=1;return x', 1)
 
 -- Test blocks.
-test_stat(' { x = 1 ; } ; { y = 2 } ; ; { return x + y } ', 3)
-test_stat('x=1;{y=2;;return x+y}', 3)
+test_stat(' { x = 1 ; } ; { y = 2 } ; { return x + y } ', 3)
+test_stat('x=1;{y=2;return x+y}', 3)
 test_stat([[
 x = 1;
 y = 2;
 return x + y]], 3)
+test_stat('{};;{;;};{ { } };', 0) -- empty blocks and statements
 
 -- Test print statement.
 test_stat('@(2*2)', 0)
@@ -137,6 +139,7 @@ if a == 0 {
 }]], 3)
 test_stat(
   'if 0 { if 1 { return 1 } else { return 2 } } else { if 1 { return 3 } else { return 4} }', 3)
+test_stat('if 1 {} else {return 1}', 0)
 
 -- Test while.
 test_stat('x = 0; while x < 10 { x = x + 1}; return x', 10)
@@ -162,5 +165,20 @@ test_stat('x = 0 or 1; return x', 1)
 test_stat('x = 1 or 0; return x', 1)
 test_stat('x=(1==1)and(0==0)or!(0==0);return x', 1)
 test_stat('x=(1==1)and!(0==0)or!(0==0);return x', 0)
+
+-- Test switch.
+test_stat([[
+switch 1 + 2
+case 1 { return 1 }
+case 2 { return 2 }
+else { return 3}]], 3)
+test_stat([[
+x = 2;
+switch x
+case 1 { return 1 }
+case 2 { return 2 }
+else { return 3 }]], 2)
+test_stat('switch 0 else { return 1 }', 1)
+test_stat('switch 1; return 2', 2)
 
 print('Passed')
