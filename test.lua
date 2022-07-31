@@ -149,4 +149,18 @@ while i {
 };
 return factorial]], 720)
 
+-- Test logical operators.
+test_expr('4 and 5')
+test_expr('0 and 3', 0)
+test_expr('0 or 10', 10)
+test_expr('2 or 3')
+test_expr('1 and 2 or 3', 2)
+test_expr('0 and 1 or 2', 2)
+test_stat('x = 1 and 0; return x', 0)
+test_stat('x = 0 and 1; return x', 0)
+test_stat('x = 0 or 1; return x', 1)
+test_stat('x = 1 or 0; return x', 1)
+test_stat('x=(1==1)and(0==0)or!(0==0);return x', 1)
+test_stat('x=(1==1)and!(0==0)or!(0==0);return x', 0)
+
 print('Passed')

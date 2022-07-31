@@ -24,17 +24,8 @@ function grammar:_init()
   local function node(tag, patt) return Ct(Cg(Cc(tag), 'tag') * patt) * self._space end
   local function reserved(...) return self:_reserved(...) end
   local function op(patt) return Cg(C(patt), 'op') * self._space end
-  -- Folds a left-associative binary operator.
-  function fold_binop(tree, new)
-    return {tag = 'binop', left = tree, op = new.op, right = new.right}
-  end
-  -- Folds a right-associative list of binary operations.
-  function fold_binop_rassoc(list)
-    local tree = list[#list]
-    for i = #list - 1, 2, -2 do
-      tree = {tag = 'binop', right = tree, op = list[i], left = list[i - 1]}
-    end
-    return tree
+  local function opnode(tag, left, op, right)
+    return {tag = tag, left = left, op = op, right = right}
   end
   -- Folds an if-elseif-else statement, with elseif being optional.
   -- if {...} elseif {...} is transformed into if {...} else { if {...} }.
@@ -45,6 +36,16 @@ function grammar:_init()
     node.block_else = new.tag == 'if' and new or new.block
     return tree
   end
+  -- Folds a left-associative binary operator.
+  function fold_binop(tree, new) return opnode('binop', tree, new.op, new.right) end
+  -- Folds a right-associative list of binary operations.
+  function fold_binop_rassoc(list)
+    local tree = list[#list]
+    for i = #list - 1, 2, -2 do tree = opnode('binop', list[i - 1], list[i], tree) end
+    return tree
+  end
+  -- Folds a left-associative logical operator.
+  function fold_logop(tree, new) return opnode('logop', tree, new.op, new.right) end
 
   self._grammar = P{
     V('reset_pos') * self._space * V('stats') * -1,
@@ -77,7 +78,7 @@ function grammar:_init()
     -- Operators.
     op_exp = C(S('^')) * self._space,
 
-    -- Expressions.
+    -- Expressions in order of precedence.
     primary = V('variable') + V('numeral') + token('(') * V('expr') * token(')') + V('unary'),
     unary = node('unop', op(S('-!')) * Cg(V('exp'), 'left')),
     exp = Ct(V('primary') * (V('op_exp') * V('primary'))^0) / fold_binop_rassoc,
@@ -85,7 +86,9 @@ function grammar:_init()
     add = Cf(V('mul') * Ct(op(S('+-')) * Cg(V('mul'), 'right'))^0, fold_binop),
     cmp = Cf(V('add') * Ct(op(P('>=') + '>' + '<=' + '<' + '==' + '!=') * Cg(V('add'), 'right'))^0,
       fold_binop), --
-    expr = V('cmp'),
+    land = Cf(V('cmp') * Ct(op('and') * Cg(V('cmp'), 'right'))^0, fold_logop),
+    lor = Cf(V('land') * Ct(op('or') * Cg(V('land'), 'right'))^0, fold_logop), --
+    expr = V('lor'),
 
     -- Utility.
     reset_pos = P(function()
@@ -160,7 +163,7 @@ end
 -- @param op Opcode to add.
 -- @param value Optional value for `op`, such as a number to push or variable to store or load.
 function opcodes:_add(op, value)
-  table.insert(self, op)
+  table.insert(self, (assert(op, 'attemp to add nil op')))
   if value then table.insert(self, value) end
 end
 
@@ -177,11 +180,12 @@ function opcodes:_variable_id(id, can_create)
   return assert(self.vars[id], 'undefined variable: ' .. id)
 end
 
-local binops = {
+local bin_opcodes = {
   ['+'] = 'add', ['-'] = 'sub', ['*'] = 'mul', ['/'] = 'div', ['%'] = 'mod', ['^'] = 'pow',
   ['>='] = 'gte', ['>'] = 'gt', ['<='] = 'lte', ['<'] = 'lt', ['=='] = 'eq', ['!='] = 'ne'
 }
-local unops = {['-'] = 'unm', ['!'] = 'not'}
+local un_opcodes = {['-'] = 'unm', ['!'] = 'not'}
+local log_opcodes = {['and'] = 'jmpzp', ['or'] = 'jmpnzp'}
 
 -- Adds the opcodes for the given expression to the list.
 -- @param node Abstract syntax tree node of the expression to add.
@@ -193,10 +197,15 @@ function opcodes:_add_expr(node)
   elseif node.tag == 'binop' then
     self:_add_expr(node.left)
     self:_add_expr(node.right)
-    self:_add(binops[node.op])
+    self:_add(bin_opcodes[node.op])
   elseif node.tag == 'unop' then
     self:_add_expr(node.left)
-    self:_add(unops[node.op])
+    self:_add(un_opcodes[node.op])
+  elseif node.tag == 'logop' then
+    self:_add_expr(node.left)
+    local over_right = self:_jump_start(log_opcodes[node.op])
+    self:_add_expr(node.right)
+    self:_jump_end(over_right)
   else
     error('unknown expr tag: ' .. tag)
   end
@@ -306,6 +315,8 @@ local un_ops = {
   ['not'] = function(a) return a == 1 and 0 or 1 end
 }
 
+local jump_ops = {jmp = true, jmpz = true, jmpzp = true, jmpnzp = true}
+
 local _print = print -- for @ statement so that it is never silenced.
 
 -- Stack machine.
@@ -329,7 +340,7 @@ function machine:run(opcodes)
       break
     elseif opcode == 'push' then
       local value = opcodes:next()
-      print('push', value)
+      print(opcode, value)
       stack:push(value)
     elseif bin_ops[opcode] then
       local right, left = stack:pop(), stack:pop()
@@ -341,27 +352,29 @@ function machine:run(opcodes)
       stack:push(un_ops[opcode](value))
     elseif opcode == 'load' then
       local id = opcodes:next()
-      print('load', id)
+      print(opcode, id)
       stack:push(memory[id])
     elseif opcode == 'store' then
       local id = opcodes:next()
-      print('store', id)
+      print(opcode, id)
       memory[id] = stack:pop()
     elseif opcode == 'print' then
       local value = stack:pop()
-      print('print', value)
+      print(opcode, value)
       _print(value)
-    elseif opcode == 'jmp' then
+    elseif jump_ops[opcode] then
       local rel = opcodes:next()
-      print('jmp', rel)
-      opcodes:jump(rel)
-    elseif opcode == 'jmpz' then
-      local rel = opcodes:next()
-      if stack[#stack] == 0 then -- 0 is a false conditional value
-        print('jmpz', rel)
-        opcodes:jump(rel)
+      print(opcode, rel)
+      local zero = stack[#stack] == 0
+      local jump = opcode == 'jmp' or ((opcode == 'jmpz' or opcode == 'jmpzp') and zero) or
+        (opcode == 'jmpnzp' and not zero)
+      local pop = opcode == 'jmpz' or (opcode == 'jmpzp' and not zero) or
+        (opcode == 'jmpnzp' and zero)
+      if jump then opcodes:jump(rel) end
+      if pop then
+        print('pop') -- not an opcode, but verify pop op
+        stack:pop()
       end
-      stack:pop()
     else
       error('unknown instruction: ' .. opcode)
     end
