@@ -67,10 +67,10 @@ function grammar:_init()
       V('stat'), --
     block = token('{') * V('stats') * token(';')^-1 * token('}'),
     stat = V('block') + V('if') + V('while') + V('assign') + V('print') + V('return'),
-    ['if'] = Cf(node('if', reserved('if') * Cg(V('expr'), 'cond') * Cg(V('block'), 'block')) *
-      (node('if', reserved('elseif') * Cg(V('expr'), 'cond') * Cg(V('block'), 'block')))^0 *
+    ['if'] = Cf(node('if', reserved('if') * Cg(V('expr'), 'expr') * Cg(V('block'), 'block')) *
+      (node('if', reserved('elseif') * Cg(V('expr'), 'expr') * Cg(V('block'), 'block')))^0 *
       (node('else', reserved('else') * Cg(V('block'), 'block')))^-1, fold_if),
-    ['while'] = node('while', reserved('while') * Cg(V('expr'), 'cond') * Cg(V('block'), 'block')),
+    ['while'] = node('while', reserved('while') * Cg(V('expr'), 'expr') * Cg(V('block'), 'block')),
     assign = node('assign', V('identifier') * token('=') * Cg(V('expr'), 'expr')),
     print = node('print', token('@') * Cg(V('expr'), 'expr')),
     ['return'] = node('return', reserved('return') * Cg(V('expr'), 'expr')),
@@ -143,6 +143,31 @@ end
 -- ===============================================================================================--
 -- Compiler.
 
+-- Opcodes.
+local RET = 'ret'
+local PUSH = 'push'
+local ADD = 'add'
+local SUB = 'sub'
+local MUL = 'mul'
+local DIV = 'div'
+local MOD = 'mod'
+local POW = 'pow'
+local GTE = 'gte'
+local GT = 'gt'
+local LTE = 'lte'
+local LT = 'lt'
+local EQ = 'eq'
+local NE = 'ne'
+local UNM = 'unm'
+local NOT = 'not'
+local LOAD = 'load'
+local STORE = 'store'
+local PRINT = 'print'
+local JMP = 'jmp'
+local JMPZ = 'jmpz'
+local JMPZP = 'jmpzp'
+local JMPNZP = 'jmpnzp'
+
 -- List of opcodes for a stack machine.
 local opcodes = {}
 
@@ -154,8 +179,8 @@ function opcodes.new(ast)
   local codes = setmetatable({}, {__index = opcodes})
   codes:_add_stat(ast)
   -- Add implicit 'return 0' statement
-  codes:_add('push', 0)
-  codes:_add('ret')
+  codes:_add(PUSH, 0)
+  codes:_add(RET)
   return codes
 end
 
@@ -181,19 +206,19 @@ function opcodes:_variable_id(id, can_create)
 end
 
 local bin_opcodes = {
-  ['+'] = 'add', ['-'] = 'sub', ['*'] = 'mul', ['/'] = 'div', ['%'] = 'mod', ['^'] = 'pow',
-  ['>='] = 'gte', ['>'] = 'gt', ['<='] = 'lte', ['<'] = 'lt', ['=='] = 'eq', ['!='] = 'ne'
+  ['+'] = ADD, ['-'] = SUB, ['*'] = MUL, ['/'] = DIV, ['%'] = MOD, ['^'] = POW, ['>='] = GTE,
+  ['>'] = GT, ['<='] = LTE, ['<'] = LT, ['=='] = EQ, ['!='] = NE
 }
-local un_opcodes = {['-'] = 'unm', ['!'] = 'not'}
-local log_opcodes = {['and'] = 'jmpzp', ['or'] = 'jmpnzp'}
+local un_opcodes = {['-'] = UNM, ['!'] = NOT}
+local log_opcodes = {['and'] = JMPZP, ['or'] = JMPNZP}
 
 -- Adds the opcodes for the given expression to the list.
 -- @param node Abstract syntax tree node of the expression to add.
 function opcodes:_add_expr(node)
   if node.tag == 'number' then
-    self:_add('push', node.value)
+    self:_add(PUSH, node.value)
   elseif node.tag == 'variable' then
-    self:_add('load', self:_variable_id(node.id))
+    self:_add(LOAD, self:_variable_id(node.id))
   elseif node.tag == 'binop' then
     self:_add_expr(node.left)
     self:_add_expr(node.right)
@@ -235,35 +260,35 @@ end
 function opcodes:_add_stat(node)
   if node.tag == 'assign' then
     self:_add_expr(node.expr)
-    self:_add('store', self:_variable_id(node.id, true))
+    self:_add(STORE, self:_variable_id(node.id, true))
   elseif node.tag == 'seq' then
     self:_add_stat(node.left)
     self:_add_stat(node.right)
   elseif node.tag == 'print' then
     self:_add_expr(node.expr)
-    self:_add('print')
+    self:_add(PRINT)
   elseif node.tag == 'return' then
     self:_add_expr(node.expr)
-    self:_add('ret')
+    self:_add(RET)
   elseif node.tag == 'if' then
-    self:_add_expr(node.cond)
-    local over_if = self:_jump_start('jmpz')
+    self:_add_expr(node.expr)
+    local over_if = self:_jump_start(JMPZ)
     self:_add_stat(node.block)
     if not node.block_else then
-      self:_jump_end(over_if) -- cond was false
+      self:_jump_end(over_if) -- expr was false
     else
-      local over_else = self:_jump_start('jmp')
-      self:_jump_end(over_if) -- jump into else block (cond was false)
+      local over_else = self:_jump_start(JMP)
+      self:_jump_end(over_if) -- jump into else block (expr was false)
       self:_add_stat(node.block_else)
-      self:_jump_end(over_else) -- cond was true
+      self:_jump_end(over_else) -- expr was true
     end
   elseif node.tag == 'while' then
     local to_cond = self:_jump_end()
-    self:_add_expr(node.cond)
-    local over_while = self:_jump_start('jmpz')
+    self:_add_expr(node.expr)
+    local over_while = self:_jump_start(JMPZ)
     self:_add_stat(node.block)
-    self:_jump_start('jmp', to_cond)
-    self:_jump_end(over_while) -- cond was false
+    self:_jump_start(JMP, to_cond)
+    self:_jump_end(over_while) -- expr was false
   else
     error('unknown stat tag: ' .. tag)
   end
@@ -280,10 +305,7 @@ end
 ---
 -- Jumps to a relative opcode position in the list.
 -- @param rel Opcode position to jump to, relative to the current position.
-function opcodes:jump(rel)
-  self.i = self.i + rel
-  assert(self.i > 0 and self.i <= self.i, 'invalid jump: ' .. rel)
-end
+function opcodes:jump(rel) self.i = self.i + rel end
 
 -- ===============================================================================================--
 -- Interpreter.
@@ -296,26 +318,26 @@ function stack:push(value) table.insert(self, value) end
 function stack:pop() return table.remove(self) end
 
 local bin_ops = {
-  add = function(a, b) return a + b end, --
-  sub = function(a, b) return a - b end, --
-  mul = function(a, b) return a * b end, --
-  div = function(a, b) return a / b end, --
-  mod = function(a, b) return a % b end, --
-  pow = function(a, b) return a^b end, --
-  gte = function(a, b) return a >= b and 1 or 0 end, --
-  gt = function(a, b) return a > b and 1 or 0 end, --
-  lte = function(a, b) return a <= b and 1 or 0 end, --
-  lt = function(a, b) return a < b and 1 or 0 end, --
-  eq = function(a, b) return a == b and 1 or 0 end, --
-  ne = function(a, b) return a ~= b and 1 or 0 end --
+  [ADD] = function(a, b) return a + b end, --
+  [SUB] = function(a, b) return a - b end, --
+  [MUL] = function(a, b) return a * b end, --
+  [DIV] = function(a, b) return a / b end, --
+  [MOD] = function(a, b) return a % b end, --
+  [POW] = function(a, b) return a^b end, --
+  [GTE] = function(a, b) return a >= b and 1 or 0 end, --
+  [GT] = function(a, b) return a > b and 1 or 0 end, --
+  [LTE] = function(a, b) return a <= b and 1 or 0 end, --
+  [LT] = function(a, b) return a < b and 1 or 0 end, --
+  [EQ] = function(a, b) return a == b and 1 or 0 end, --
+  [NE] = function(a, b) return a ~= b and 1 or 0 end --
 }
 
 local un_ops = {
-  unm = function(a) return -a end, --
-  ['not'] = function(a) return a == 1 and 0 or 1 end
+  [UNM] = function(a) return -a end, --
+  [NOT] = function(a) return a == 1 and 0 or 1 end
 }
 
-local jump_ops = {jmp = true, jmpz = true, jmpzp = true, jmpnzp = true}
+local jump_ops = {[JMP] = true, [JMPZ] = true, [JMPZP] = true, [JMPNZP] = true}
 
 local _print = print -- for @ statement so that it is never silenced.
 
@@ -336,9 +358,9 @@ function machine:run(opcodes)
   local memory, stack = self._memory, self._stack
   while true do
     local opcode = opcodes:next()
-    if opcode == 'ret' then
+    if opcode == RET then
       break
-    elseif opcode == 'push' then
+    elseif opcode == PUSH then
       local value = opcodes:next()
       print(opcode, value)
       stack:push(value)
@@ -350,15 +372,15 @@ function machine:run(opcodes)
       local value = stack:pop()
       print(opcode, value)
       stack:push(un_ops[opcode](value))
-    elseif opcode == 'load' then
+    elseif opcode == LOAD then
       local id = opcodes:next()
       print(opcode, id)
       stack:push(memory[id])
-    elseif opcode == 'store' then
+    elseif opcode == STORE then
       local id = opcodes:next()
       print(opcode, id)
       memory[id] = stack:pop()
-    elseif opcode == 'print' then
+    elseif opcode == PRINT then
       local value = stack:pop()
       print(opcode, value)
       _print(value)
@@ -366,10 +388,9 @@ function machine:run(opcodes)
       local rel = opcodes:next()
       print(opcode, rel)
       local zero = stack[#stack] == 0
-      local jump = opcode == 'jmp' or ((opcode == 'jmpz' or opcode == 'jmpzp') and zero) or
-        (opcode == 'jmpnzp' and not zero)
-      local pop = opcode == 'jmpz' or (opcode == 'jmpzp' and not zero) or
-        (opcode == 'jmpnzp' and zero)
+      local jump = opcode == JMP or ((opcode == JMPZ or opcode == JMPZP) and zero) or
+        (opcode == JMPNZP and not zero)
+      local pop = opcode == JMPZ or (opcode == JMPZP and not zero) or (opcode == JMPNZP and zero)
       if jump then opcodes:jump(rel) end
       if pop then
         print('pop') -- not an opcode, but verify pop op
