@@ -16,149 +16,135 @@ local grammar = {}
 -- @usage ast = grammar.new():parse(input)
 function grammar.new() return setmetatable({}, {__index = grammar}) end
 
--- Initializes the grammar pattern.
-function grammar:_init()
-  self._space = V('space')
-  -- Convenience functions.
-  local function token(char) return char * self._space end
-  local function field(name, patt) return Cg(patt, name) end
-  local function node(tag, patt) return Ct(field('tag', Cc(tag)) * patt) * self._space end
-  local function op(patt) return C(patt) * self._space end
-  local function reserved(...) return self:_reserved(...) end
-  local function binop_node(tag, left, op, right)
-    return {tag = tag, left = left, op = op, right = right}
-  end
-  -- Folded version of node().
-  function fnode(tag, patt)
-    return Cf(patt, function(left, op, right) return binop_node(tag, left, op, right) end)
-  end
-  -- Folds an if-elseif-else statement, with elseif being optional.
-  -- if {...} elseif {...} is transformed into if {...} else { if {...} }.
-  -- Note: an if by itself does not need folding.
-  function fold_if(node, new)
-    local if_node = node
-    while if_node.block_else do if_node = if_node.block_else end
-    if new.tag == 'else' then new = new.block end
-    if_node.block_else = new
-    return node
-  end
-  -- Folds a switch-case-else statement into if-elseif-else, with case being optional.
-  -- switch expr; case x {...} case y {...} is transformed into
-  -- if expr == x {...} else { if expr == y {...} }.
-  -- Note: a switch by itself does not need folding; it is a no-op.
-  function fold_switch(node, new)
-    if new.expr then new.expr = binop_node('binop', node.expr, '==', new.expr) end
-    if node.body then
-      fold_if(node.body, new) -- continue if statement
-      return node
-    end
-    if new.tag == 'else' then new = new.block end
-    node.body = new -- either {tag = 'if' ... } or statement(s) from else block
-    return node
-  end
-
-  self._grammar = P{
-    V('reset_pos') * V('stats') * -1,
-
-    -- Whitespace and comments.
-    space = (locale.space + V('comment'))^0 * V('save_pos'),
-    comment = '#{' * (P(1) - '#}')^0 * '#}' + '#' * (P(1) - '\n')^0,
-    -- comment = node('comment', field('text', '#{' * (P(1) - '#}')^0 * '#}' + '#' * (P(1) - '\n')^0)),
-    
-    -- Basic patterns.
-    identifier = C(Cmt((alpha + '_') * (alnum + '_')^0, self:_non_reserved())) * self._space,
-    variable = node('variable', field('id', V('identifier'))), --
-    hex_num = '0' * S('xX') * xdigit^1,
-    dec_num = digit^1 * ('.' * digit^1)^-1 * (S('eE') * S('+-')^-1 * digit^1)^-1,
-    number = node('number', field('value', (V('hex_num') + V('dec_num')) / tonumber)),
-    int = P('-')^-1 * digit^1 / tonumber, -- for indexes and ranges
-    
-    -- Strings.
-    string = node('string',
-      '"' * Cg((V('char_esc') + V('hex_esc') + V('emb_expr') + V('chars')))^0 * '"'),
-    char_esc = '\\' * C(S('abfnrtvz"\\`')) /
-      setmetatable({a = '\a', b = '\b', f = '\f', n = '\n', r = '\r', t = '\t', v = '\v', z = '\z'},
-        {__index = function(_, k) return k end}),
-    hex_esc = Cs(P('\\') / '0' * 'x' * xdigit * xdigit) / tonumber / string.char, --
-    emb_expr = '`' * V('expr') * '`', --
-    chars = (P(1) - S('"\\`'))^1,
-
-    -- Expressions in order of precedence.
-    primary = V('postfix') + V('variable') + V('number') + V('string') + V('parens') + V('unary'),
-    postfix = V('index'), --
-    index = node('index', field('id', V('identifier')) * token('[') *
-      (field('start', V('int')^-1) * token(':') * field('end', V('int')^-1) +
-        field('value', V('int'))) * token(']')), --
-    parens = token('(') * V('expr') * token(')'),
-    unary = node('unop', field('op', op(S('-!'))) * field('expr', V('exp'))),
-    exp = node('binop',
-      field('left', V('primary')) * (field('op', op('^')) * field('right', V('exp'))))^1 +
-      V('primary'), -- right-associative, so cannot use fnode('binop', ...)
-    mul = fnode('binop', V('exp') * Cg(op(S('*/%')) * V('exp'))^0),
-    add = fnode('binop', V('mul') * Cg(op(S('+-')) * V('mul'))^0),
-    concat = fnode('binop', V('add') * Cg(op('..') * V('add'))^0),
-    cmp = fnode('binop',
-      V('concat') * Cg(op(P('>=') + '>' + '<=' + '<' + '==' + '!=') * V('concat'))^0),
-    land = fnode('logop', V('cmp') * Cg(op('and') * V('cmp'))^0),
-    lor = fnode('logop', V('land') * Cg(op('or') * V('land'))^0), --
-    expr = V('lor'),
-
-    -- Statements.
-    block = token('{') * (V('stats') + node('empty', token(';')^0)) * token('}'),
-    stats = node('seq', field('left', V('stat')) * (token(';')^1 * field('right', V('stats')))) +
-      V('stat') * token(';')^-1, --
-    stat = V('block') + V('if') + V('switch') + V('while') + V('assign') + V('print') + V('return'),
-    ['if'] = Cf(
-      node('if', reserved('if') * field('expr', V('expr')) * field('block', V('block'))) *
-        (node('if', reserved('elseif') * field('expr', V('expr')) * field('block', V('block'))))^0 *
-        (node('else', reserved('else') * field('block', V('block'))))^-1, fold_if),
-    switch = Cf(node('switch', reserved('switch') * field('expr', V('expr'))) *
-      (node('if', reserved('case') * field('expr', V('expr')) * field('block', V('block'))))^0 *
-      (node('else', reserved('else') * field('block', V('block'))))^-1, fold_switch),
-    ['while'] = node('while',
-      reserved('while') * field('expr', V('expr')) * field('block', V('block'))),
-    assign = node('assign', field('id', V('identifier')) * token('=') * field('expr', V('expr'))),
-    print = node('print', token('@') * field('expr', V('expr'))),
-    ['return'] = node('return', reserved('return') * field('expr', V('expr'))),
-
-    -- Utility.
-    reset_pos = P(function()
-      self._max_pos = 0
-      return true
-    end) * self._space, --
-    save_pos = P(function(_, i)
-      self._max_pos = math.max(self._max_pos, i)
-      return true
-    end)
-  }
-end
-
--- Reserves the given word and returns a pattern that matches it.
--- This is to be used when constructing the grammar in `_init()`.
--- @param word Word to reserve and return a matching pattern for.
--- @see _init
-function grammar:_reserved(word)
-  if not self._reserved_words then self._reserved_words = {} end
-  self._reserved_words[word] = true
-  return word * -alnum * self._space
-end
-
--- Returns a function that validates a captured word as non-reserved.
--- This is to be used in conjunction with `lpeg.Cmt()` when constructing the grammar in `_init()`.
--- @see _init
-function grammar:_non_reserved()
-  return function(_, _, word)
-    if self._reserved_words[word] then return false end
-    return true, word
-  end
-end
-
 ---
 -- Parses the given input and returns the resulting Abstract Syntax Tree.
 -- Raises an error if a syntax error was encountered.
 -- @param input String input to parse.
 function grammar:parse(input)
-  if not self._grammar then self:_init() end
+  if not self._grammar then
+    local space = V('space')
+    local reserved_words = {}
+    -- Convenience functions.
+    local function token(char) return char * space end
+    local function field(name, patt) return Cg(patt, name) end
+    local function node(tag, patt) return Ct(field('tag', Cc(tag)) * patt) * space end
+    local function op(patt) return C(patt) * space end
+    local function reserved(word)
+      reserved_words[word] = true
+      return word * -alnum * space
+    end
+    local function binop_node(tag, left, op, right)
+      return {tag = tag, left = left, op = op, right = right}
+    end
+    -- Folded version of node().
+    function fnode(tag, patt)
+      return Cf(patt, function(left, op, right) return binop_node(tag, left, op, right) end)
+    end
+    -- Folds an if-elseif-else statement, with elseif being optional.
+    -- if {...} elseif {...} is transformed into if {...} else { if {...} }.
+    -- Note: an if by itself does not need folding.
+    function fold_if(node, new)
+      local if_node = node
+      while if_node.block_else do if_node = if_node.block_else end
+      if new.tag == 'else' then new = new.block end
+      if_node.block_else = new
+      return node
+    end
+    -- Folds a switch-case-else statement into if-elseif-else, with case being optional.
+    -- switch expr; case x {...} case y {...} is transformed into
+    -- if expr == x {...} else { if expr == y {...} }.
+    -- Note: a switch by itself does not need folding; it is a no-op.
+    function fold_switch(node, new)
+      if new.expr then new.expr = binop_node('binop', node.expr, '==', new.expr) end
+      if node.body then
+        fold_if(node.body, new) -- continue if statement
+        return node
+      end
+      if new.tag == 'else' then new = new.block end
+      node.body = new -- either {tag = 'if' ... } or statement(s) from else block
+      return node
+    end
+
+    self._grammar = P{
+      V('reset_pos') * V('stats') * -1,
+
+      -- Whitespace and comments.
+      space = (locale.space + V('comment'))^0 * V('save_pos'),
+      comment = '#{' * (P(1) - '#}')^0 * '#}' + '#' * (P(1) - '\n')^0,
+      -- comment = node('comment', field('text', '#{' * (P(1) - '#}')^0 * '#}' + '#' * (P(1) - '\n')^0)),
+      
+      -- Basic patterns.
+      identifier = C(Cmt((alpha + '_') * (alnum + '_')^0, function(_, _, word)
+        if reserved_words[word] then return false end
+        return true, word
+      end)) * space, variable = node('variable', field('id', V('identifier'))),
+      hex_num = '0' * S('xX') * xdigit^1,
+      dec_num = digit^1 * ('.' * digit^1)^-1 * (S('eE') * S('+-')^-1 * digit^1)^-1,
+      number = node('number', field('value', (V('hex_num') + V('dec_num')) / tonumber)),
+      int = P('-')^-1 * digit^1 / tonumber, -- for indexes and ranges
+      
+      -- Strings.
+      string = node('string',
+        '"' * Cg((V('char_esc') + V('hex_esc') + V('emb_expr') + V('chars')))^0 * '"'),
+      char_esc = '\\' * C(S('abfnrtvz"\\`')) /
+        setmetatable({
+          a = '\a', b = '\b', f = '\f', n = '\n', r = '\r', t = '\t', v = '\v', z = '\z'
+        }, {__index = function(_, k) return k end}),
+      hex_esc = Cs(P('\\') / '0' * 'x' * xdigit * xdigit) / tonumber / string.char,
+      emb_expr = '`' * V('expr') * '`', --
+      chars = (P(1) - S('"\\`'))^1,
+
+      -- Expressions in order of precedence.
+      primary = V('postfix') + V('variable') + V('number') + V('string') + V('parens') + V('unary'),
+      postfix = V('index'), --
+      index = node('index', field('id', V('identifier')) * token('[') *
+        (field('start', V('int')^-1) * token(':') * field('end', V('int')^-1) +
+          field('value', V('int'))) * token(']')), --
+      parens = token('(') * V('expr') * token(')'),
+      unary = node('unop', field('op', op(S('-!'))) * field('expr', V('exp'))),
+      exp = node('binop',
+        field('left', V('primary')) * (field('op', op('^')) * field('right', V('exp'))))^1 +
+        V('primary'), -- right-associative, so cannot use fnode('binop', ...)
+      mul = fnode('binop', V('exp') * Cg(op(S('*/%')) * V('exp'))^0),
+      add = fnode('binop', V('mul') * Cg(op(S('+-')) * V('mul'))^0),
+      concat = fnode('binop', V('add') * Cg(op('..') * V('add'))^0),
+      cmp = fnode('binop',
+        V('concat') * Cg(op(P('>=') + '>' + '<=' + '<' + '==' + '!=') * V('concat'))^0),
+      land = fnode('logop', V('cmp') * Cg(op('and') * V('cmp'))^0),
+      lor = fnode('logop', V('land') * Cg(op('or') * V('land'))^0), --
+      expr = V('lor'),
+
+      -- Statements.
+      block = token('{') * (V('stats') + node('empty', token(';')^0)) * token('}'),
+      stats = node('seq', field('left', V('stat')) * (token(';')^1 * field('right', V('stats')))) +
+        V('stat') * token(';')^-1,
+      stat = V('block') + V('if') + V('switch') + V('while') + V('assign') + V('print') +
+        V('return'),
+      ['if'] = Cf(
+        node('if', reserved('if') * field('expr', V('expr')) * field('block', V('block'))) *
+          (node('if', reserved('elseif') * field('expr', V('expr')) * field('block', V('block'))))^0 *
+          (node('else', reserved('else') * field('block', V('block'))))^-1, fold_if),
+      switch = Cf(node('switch', reserved('switch') * field('expr', V('expr'))) *
+        (node('if', reserved('case') * field('expr', V('expr')) * field('block', V('block'))))^0 *
+        (node('else', reserved('else') * field('block', V('block'))))^-1, fold_switch),
+      ['while'] = node('while',
+        reserved('while') * field('expr', V('expr')) * field('block', V('block'))),
+      assign = node('assign', field('id', V('identifier')) * token('=') * field('expr', V('expr'))),
+      print = node('print', token('@') * field('expr', V('expr'))),
+      ['return'] = node('return', reserved('return') * field('expr', V('expr'))),
+
+      -- Utility.
+      reset_pos = P(function()
+        self._max_pos = 0
+        return true
+      end) * space, --
+      save_pos = P(function(_, i)
+        self._max_pos = math.max(self._max_pos, i)
+        return true
+      end)
+    }
+  end
+
   local ast = self._grammar:match(input)
   if not ast then
     local parsed = input:sub(1, self._max_pos - 1)
@@ -168,6 +154,7 @@ function grammar:parse(input)
     local col = e - s + 2 -- blame col of next char
     error(string.format('syntax error at line %d, col %d', line, col))
   end
+
   return ast
 end
 
@@ -356,7 +343,7 @@ function opcodes:_add_stat(node)
       end, --
       switch = function(self, node) if node.body then self:_add_stat(node.body) end end,
       empty = function() end -- no-op
-    }, {__index = function(_, tag) error('unknown stat tag: ' .. node.tag) end})
+    }, {__index = function(_, tag) error('unknown stat tag: ' .. tag) end})
   end
   self._dispatch_add_stat[node.tag](self, node)
 end
