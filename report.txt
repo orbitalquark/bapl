@@ -24,9 +24,9 @@ a) A case (switch) statement
     or more instances of 'case' followed by a case expression and block, and then an optional
     'else' block.  The 'else' keyword was reused instead of reserving a new keyword like 'default'.
 
-    Rather than having the parser create a new AST tree to compile, it instead transforms
+    Rather than having the parser create a new AST node to compile, it instead transforms
     a switch-case-else statement into an if-elseif-else statement and its corresponding AST
-    tree. This method was chosen in order to reuse as much existing code as possible (no new
+    node. This method was chosen in order to reuse as much existing code as possible (no new
     opcodes are needed and the interpreter remains unchanged). Each 'case <expr> { ... }'
     construct is converted into 'if <switch expr> == <case expr> { ... }' with else blocks
     created and filled in as necessary. No new opcodes are needed.
@@ -151,10 +151,10 @@ d) Substring extraction
 
   Implementation:
 
-    Added a new 'brackets' grammar rule and added it to a new 'postfix' rule that has the
-    highest priority. The 'brackets' rule looks for a variable name followed by a bracketed
-    expression that contains either a single integer index, or a range of indices separated by a
-    ':' token. New 'index' and 'substr' opcodes are used to perform the indexing.
+    Added a new 'index' grammar rule and added it to a new 'postfix' rule that has the highest
+    priority. The 'index' rule looks for a variable name followed by a bracketed expression that
+    contains either a single integer index, or a range of indices separated by a ':' token. New
+    'index' and 'substr' opcodes are used to perform the indexing.
 
     The parser produces a new 'index' node that contains the variable to index, and either a
     single index or range of indices to use.

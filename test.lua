@@ -188,13 +188,14 @@ test_expr([["foo\"bar"]], 'foo"bar')
 test_expr([["foo\\bar"]], 'foo\\bar')
 test_expr([["foo\tbar"]], 'foo\tbar')
 test_expr([["foo\x20bar"]], 'foo bar')
-test_expr([["foo\X20bar"]], 'foo bar')
 test_expr([["foo
 bar"]], 'foo\nbar')
 test_expr([["1 + 2 = `1+2`"]], '1 + 2 = 3')
 test_expr([["`1 + 2` == `1+2`"]], '3 == 3')
 test_expr([["`1+2`"]], '3')
 test_expr([["foo`"bar"`baz"]], 'foobarbaz')
+ok, err = pcall(test_stat, [[x="foo\ybar"]])
+assert(not ok and err:find('syntax error'))
 
 -- Test concatenation.
 test_expr([["foo" .. "bar"]], 'foobar')
