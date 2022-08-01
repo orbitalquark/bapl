@@ -1,0 +1,176 @@
+Final project report
+
+a) A case (switch) statement
+
+  Syntax:
+
+    switch <expr>
+    case <expr> { <body> }
+    case <expr> { <body> }
+    ...
+    else { <body> }
+
+    where '<expr>' is a valid expression and '<body>' is a valid block body. Whitespace is not
+    significant.
+
+    The 'case' blocks are optional, and the 'else' block is optional. That means a bare 'switch
+    <expr>' is valid, but does not do anything. A 'switch <expr> else { ... }' always executes
+    the 'else' block, regardless of what '<expr>' evaluates to.
+
+  Implementation:
+
+    Added a new 'switch' grammar rule and added it to the existing 'stat' rule for statements.
+    The rule looks for a 'switch' keyword and switch expression, and then it looks for zero
+    or more instances of 'case' followed by a case expression and block, and then an optional
+    'else' block.  The 'else' keyword was reused instead of reserving a new keyword like 'default'.
+
+    Rather than having the parser create a new AST tree to compile, it instead transforms
+    a switch-case-else statement into an if-elseif-else statement and its corresponding AST
+    tree. This method was chosen in order to reuse as much existing code as possible (no new
+    opcodes are needed and the interpreter remains unchanged). Each 'case <expr> { ... }'
+    construct is converted into 'if <switch expr> == <case expr> { ... }' with else blocks
+    created and filled in as necessary. No new opcodes are needed.
+
+  Caveats:
+
+    Fallthrough is not possible. Use an if-elseif-else with compound conditional expressions in
+    order to mimic fallthrough.
+
+    Repeated evaluation of the switch '<expr>' is not as performant as it could be. Perhaps the
+    compiler could instruct the interpreter to evaluate it, store the result to a temporary
+    variable, and then load and compare it with each 'case' as needed.
+
+  Testing:
+
+    Tested in the 'test.lua' automated test suite. The 'switch' tests benefit from the existing
+    'if' tests because they share the same compiler and runtime.
+
+b) Strings
+
+  Syntax:
+
+    "foo" --> foo
+    "foo\tbar" --> foo     bar
+    "foo\"bar" --> foo"bar
+    "foo\x20bar" --> foo bar
+    "1+2=`1+2`" --> 1+2=3
+
+    Double-quotes are used. Single quotes are not supported. Multi-line strings are allowed.
+
+    The usual escape sequences \a, \b, \f, \n, \r, \t, and \v may be used. The double quote
+    can be escaped using \" and the forward slash can be escaped using \\.
+
+    Arbitrary bytes can be used with a \xYY sequence where YY is a two-digit hexadecimal
+    number. For convenience, \z is shorthand for \x00.
+
+    Interpolation of expressions within strings is accomplished with backticks. Expressions
+    are evaluated in place and their result replaces the backtick sequence.
+
+  Implementation:
+
+    Added a new 'string' grammar rule with sub-rules for escapes and embedded expressions. The
+    parser captures chunks of the string and places them inside a new 'string' node. These chunks
+    are escape sequences (which have already been transformed into the correct characters/bytes
+    by LPeg), embedded expressions (yet to be evaluated), and non-escaped (plain) text. The
+    compiler then adds instructions to push these chunks or expressions to the stack and then
+    concatenate the results into a single string result. A new 'concat' opcode helps facilitate
+    this. It needs to know how many stack values to concatenate. When the interpreter encounters
+    this new opcode, it pops off the requested number of stack values, inserts them into a
+    table in reverse-order, and then uses 'table.concat()' to concatenate them into a single
+    string and pushes the result onto the stack.
+
+    In the event a simple string is pushed, the compiler does not add a 'concat' opcode. In
+    the event a string is comprised entirely of a single interpolated expression, the 'concat'
+    instruction is still used, but the interpreter simply transforms the result into a string
+    if it isn't one already.
+
+    In order to demonstrate this process: consider "1 + 2 = `1+2`!"
+
+    The parser creates a new string node with the following chunks:
+      * 1 + 2 = (string)
+      * 1 + 2 (expr)
+      * ! (string)
+
+    The compiler then adds instructions for pushing the first string value, evaluating the
+    second expression, pushing the third string value, and then concatenating the previous 3
+    values, the chunks that comprise the string.
+
+    When the interpreter enconters this series of instructions, it pushes "1 + 2 " onto the
+    stack, evaluates the expression "1 + 2" (leaving its result on the stack), pushes "!" onto
+    the stack, pops those 3 values off the stack, concatenates them (in reverse order of popping),
+    and pushes the result back onto the stack: "1 + 2 = 3!"
+
+  Testing:
+
+    Tested in the 'test.lua' automated test suite.
+
+c) String concatenation
+
+  Syntax:
+
+    "foo" .. "bar"
+
+    The concatenation operator, '..', has the same precedence as Lua's operator: after the addition
+    operators and before the comparison operators.
+
+  Implementation:
+
+    Added a new 'concat' grammar rule and inserted it between the existing 'add' and 'cmp'
+    expression rules. Unlike Lua's concatenation operator, this operator is left-associative. It
+    was chosen to be this way for the sake of simplicity and being able to use 'lpeg.Cf()'
+    with the existing 'binop' fold function.
+
+    The concatenation operator makes use of the new 'concat' opcode and interpreter evaluation
+    routines mentioned above. It also leverages the compiler's existing framework for binary
+    operators.  The only necessary change was to instruct the interpreter to use 2 for the
+    number of values needed by the 'concat' opcode.
+
+    As a side effect of the interpreter's use of Lua's 'table.concat()' to perform concatenation,
+    numbers can be concatenated to strings without the need for any type conversions.
+
+  Testing:
+
+    Tested in 'test.lua' automated test suite.
+
+d) Substring extraction
+
+  Syntax:
+
+    s = "foo"
+    s[1] --> f
+    s[-1] --> o
+    s[1:2] --> fo
+    s[2:] --> oo
+    s[:2] --> fo
+    s[:-1] --> foo
+    s[:] --> foo
+
+    Strings can be indexed with a single integer index or a range of indices. Negative indices
+    count from the end of the string. The start and end positions of a range are optional and
+    default to 1 and -1, respectively.
+
+  Implementation:
+
+    Added a new 'brackets' grammar rule and added it to a new 'postfix' rule that has the
+    highest priority. The 'brackets' rule looks for a variable name followed by a bracketed
+    expression that contains either a single integer index, or a range of indices separated by a
+    ':' token. New 'index' and 'substr' opcodes are used to perform the indexing.
+
+    The parser produces a new 'index' node that contains the variable to index, and either a
+    single index or range of indices to use.
+
+    The compiler then adds instructions to load a given variable and either index it at a
+    particular position, or obtain a substring from a position range.
+
+    When the interpreter encounters an 'index' or 'substr' opcode, it pops the variable's value
+    off the stack, verifies that it is a string, performs the requested operation, and then
+    pushes the result onto the stack.
+
+  Caveats:
+
+    Only variables can be indexed, not literal strings. "foo"[1] will not work. Instead, you
+    must do x="foo"; x[1]
+
+  Testing:
+
+    Tested in the 'test.lua' automated test suite.
