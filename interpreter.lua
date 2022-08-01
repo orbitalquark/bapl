@@ -75,7 +75,19 @@ function grammar:_init()
     variable = node('variable', V('identifier')), --
     hex_num = '0' * S('xX') * xdigit^1,
     dec_num = digit^1 * ('.' * digit^1)^-1 * (S('eE') * S('+-')^-1 * digit^1)^-1,
-    numeral = node('number', Cg((V('hex_num') + V('dec_num')) / tonumber, 'value')),
+    number = node('number', Cg((V('hex_num') + V('dec_num')) / tonumber, 'value')),
+    int = P('-')^-1 * digit^1 / tonumber,
+
+    -- Strings.
+    string = node('string',
+      '"' * (Cg(V('char_esc') + V('hex_esc') + V('emb_expr') + V('chars')))^0 * '"'),
+    char_esc = '\\' * C(S('abfnrtvz"\\`')) / {
+      a = '\a', b = '\b', f = '\f', n = '\n', r = '\r', t = '\t', v = '\v', z = '\z', ['"'] = '"',
+      ['\\'] = '\\', ['`'] = '`'
+    }, --
+    hex_esc = '\\' * S('xX') * C(xdigit * xdigit) / function(hex) return tonumber(hex, 16) end /
+      string.char, --
+    emb_expr = '`' * V('expr') * '`', chars = (P(1) - S('"\\`'))^1,
 
     -- Statements.
     block = token('{') * (V('stats') + node('empty', token(';')^0)) * token('}'),
@@ -94,14 +106,19 @@ function grammar:_init()
     ['return'] = node('return', reserved('return') * Cg(V('expr'), 'expr')),
 
     -- Expressions in order of precedence.
-    primary = V('variable') + V('numeral') + token('(') * V('expr') * token(')') + V('unary'),
+    primary = V('postfix') + V('variable') + V('number') + V('string') + V('parens') + V('unary'),
+    postfix = V('brackets'), --
+    parens = token('(') * V('expr') * token(')'),
+    brackets = node('index', V('identifier') * token('[') *
+      (Cg(V('int')^-1, 'start') * token(':') * Cg(V('int')^-1, 'end') + Cg(V('int'), 'value')) *
+      token(']')), --
     unary = node('unop', binop(S('-!')) * Cg(V('exp'), 'expr')),
     exp = Ct(V('primary') * (C(S('^')) * self._space * V('primary'))^0) / fold_binop_rassoc,
     mul = Cf(V('exp') * Ct(binop(S('*/%')) * Cg(V('exp'), 'right'))^0, fold_binop),
     add = Cf(V('mul') * Ct(binop(S('+-')) * Cg(V('mul'), 'right'))^0, fold_binop),
-    cmp = Cf(
-      V('add') * Ct(binop(P('>=') + '>' + '<=' + '<' + '==' + '!=') * Cg(V('add'), 'right'))^0,
-      fold_binop), --
+    concat = Cf(V('add') * Ct(binop('..') * Cg(V('add'), 'right'))^0, fold_binop),
+    cmp = Cf(V('concat') *
+      Ct(binop(P('>=') + '>' + '<=' + '<' + '==' + '!=') * Cg(V('concat'), 'right'))^0, fold_binop),
     land = Cf(V('cmp') * Ct(binop('and') * Cg(V('cmp'), 'right'))^0, fold_logop),
     lor = Cf(V('land') * Ct(binop('or') * Cg(V('land'), 'right'))^0, fold_logop), --
     expr = V('lor'),
@@ -183,6 +200,9 @@ local JMP = 'jmp'
 local JMPZ = 'jmpz'
 local JMPZP = 'jmpzp'
 local JMPNZP = 'jmpnzp'
+local CONCAT = 'concat'
+local INDEX = 'index'
+local SUBSTR = 'substr'
 
 -- List of opcodes for a stack machine.
 local opcodes = {}
@@ -202,10 +222,10 @@ end
 
 -- Adds the given opcode and optional value to the list.
 -- @param op Opcode to add.
--- @param value Optional value for `op`, such as a number to push or variable to store or load.
-function opcodes:_add(op, value)
+-- @param ... Optional values for `op`, such as a number to push or variable to store or load.
+function opcodes:_add(op, ...)
   table.insert(self, (assert(op, 'attemp to add nil op')))
-  if value then table.insert(self, value) end
+  for _, value in ipairs({...}) do if value then table.insert(self, value) end end
 end
 
 -- Returns a numeric ID for the given variable, creating it if possible.
@@ -218,12 +238,12 @@ function opcodes:_variable_id(id, can_create)
     table.insert(self.vars, id)
     self.vars[id] = #self.vars
   end
-  return assert(self.vars[id], 'undefined variable: ' .. id)
+  return (assert(self.vars[id], 'undefined variable: ' .. id))
 end
 
 local bin_opcodes = {
   ['+'] = ADD, ['-'] = SUB, ['*'] = MUL, ['/'] = DIV, ['%'] = MOD, ['^'] = POW, ['>='] = GTE,
-  ['>'] = GT, ['<='] = LTE, ['<'] = LT, ['=='] = EQ, ['!='] = NE
+  ['>'] = GT, ['<='] = LTE, ['<'] = LT, ['=='] = EQ, ['!='] = NE, ['..'] = CONCAT
 }
 local un_opcodes = {['-'] = UNM, ['!'] = NOT}
 local log_opcodes = {['and'] = JMPZP, ['or'] = JMPNZP}
@@ -238,7 +258,7 @@ function opcodes:_add_expr(node)
   elseif node.tag == 'binop' then
     self:_add_expr(node.left)
     self:_add_expr(node.right)
-    self:_add(bin_opcodes[node.op])
+    self:_add(bin_opcodes[node.op], node.op == '..' and 2)
   elseif node.tag == 'unop' then
     self:_add_expr(node.expr)
     self:_add(un_opcodes[node.op])
@@ -247,8 +267,26 @@ function opcodes:_add_expr(node)
     local over_right = self:_jump_start(log_opcodes[node.op])
     self:_add_expr(node.right)
     self:_jump_end(over_right)
+  elseif node.tag == 'string' then
+    for i, chunk in ipairs(node) do
+      if type(chunk) == 'table' then
+        self:_add_expr(chunk)
+      else
+        self:_add(PUSH, chunk)
+      end
+    end
+    if #node > 1 or type(node[1]) ~= 'string' then self:_add(CONCAT, #node) end
+  elseif node.tag == 'index' then
+    self:_add(LOAD, self:_variable_id(node.id))
+    if node.value then
+      self:_add(INDEX, node.value)
+    else
+      if node.start == '' then node.start = 1 end
+      if node['end'] == '' then node['end'] = -1 end
+      self:_add(SUBSTR, node.start, node['end'])
+    end
   else
-    error('unknown expr tag: ' .. tag)
+    error('unknown expr tag: ' .. node.tag)
   end
 end
 
@@ -416,11 +454,38 @@ function machine:run(opcodes)
         print('pop') -- not an opcode, but verify pop op
         stack:pop()
       end
+    elseif opcode == CONCAT then
+      local n = opcodes:next()
+      print(opcode, n)
+      if n > 1 then
+        local chunks = {}
+        for i = 1, n do table.insert(chunks, 1, stack:pop()) end
+        stack:push(table.concat(chunks))
+      elseif type(stack:top()) ~= 'string' then
+        stack:push(tostring(stack:pop()))
+      end
+    elseif opcode == INDEX then
+      local i = opcodes:next()
+      print(opcode, i)
+      local value, value_type = self:_assert_indexible(stack:pop())
+      if value_type == 'string' then stack:push(string.sub(value, i, i)) end
+    elseif opcode == SUBSTR then
+      local s, e = opcodes:next(), opcodes:next()
+      print(opcode, s, e)
+      local value, value_type = self:_assert_indexible(stack:pop())
+      if value_type == 'string' then stack:push(string.sub(value, s, e)) end
     else
       error('unknown instruction: ' .. opcode)
     end
   end
   return stack:pop()
+end
+
+-- Asserts the given value is of an indexible type and returns that value and its type.
+function machine:_assert_indexible(value)
+  local value_type = type(value)
+  if value_type ~= 'string' then error(string.format('cannot index %s value', value_type)) end
+  return value, value_type
 end
 
 -- ===============================================================================================--

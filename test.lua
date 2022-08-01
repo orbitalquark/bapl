@@ -7,7 +7,7 @@ local interpreter = require('interpreter')
 local function test_stat(stat, expected, verbose)
   local actual = interpreter.run(stat, verbose)
   assert(expected, 'expected result not given')
-  assert(actual == expected, string.format("'%s' ~= %f (expected %f)", expr, actual, expected))
+  assert(actual == expected, string.format("%s == %q (expected %q)", stat, actual, expected))
 end
 
 -- Tests the given expression returns an optional expected value.
@@ -171,7 +171,7 @@ test_stat([[
 switch 1 + 2
 case 1 { return 1 }
 case 2 { return 2 }
-else { return 3}]], 3)
+else { return 3 }]], 3)
 test_stat([[
 x = 2;
 switch x
@@ -180,5 +180,39 @@ case 2 { return 2 }
 else { return 3 }]], 2)
 test_stat('switch 0 else { return 1 }', 1)
 test_stat('switch 1; return 2', 2)
+
+-- Test strings.
+test_expr([["foo"]], 'foo')
+test_expr([["\"foo\""]], '"foo"')
+test_expr([["foo\"bar"]], 'foo"bar')
+test_expr([["foo\\bar"]], 'foo\\bar')
+test_expr([["foo\tbar"]], 'foo\tbar')
+test_expr([["foo\x20bar"]], 'foo bar')
+test_expr([["foo\X20bar"]], 'foo bar')
+test_expr([["foo
+bar"]], 'foo\nbar')
+test_expr([["1 + 2 = `1+2`"]], '1 + 2 = 3')
+test_expr([["`1 + 2` == `1+2`"]], '3 == 3')
+test_expr([["`1+2`"]], '3')
+test_expr([["foo`"bar"`baz"]], 'foobarbaz')
+
+-- Test concatenation.
+test_expr([["foo" .. "bar"]], 'foobar')
+test_expr([["foo" .. 1]], 'foo1')
+test_expr([[1+2 .. "foo"]], '3foo')
+
+-- Test indexing.
+test_stat('x="foo";return x[1]', 'f')
+test_stat('x="foobar";return x[-1]', 'r')
+test_stat('x="foo";return x[1:2]', 'fo')
+test_stat('x="foo";return x[:]', 'foo')
+test_stat('x="foo";return x[:-1]', 'foo')
+test_stat('x="foo";return x[2:]', 'oo')
+test_stat('x="foo";return x[:2]', 'fo')
+
+ok, err = pcall(test_stat, 'x=1;return x[2]')
+assert(not ok and err:find('cannot index number value'))
+ok, err = pcall(test_stat, 'x=1;return x[2:3]')
+assert(not ok and err:find('cannot index number value'))
 
 print('Passed')
