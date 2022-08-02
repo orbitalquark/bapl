@@ -29,7 +29,7 @@ a) A case (switch) statement
     node. This method was chosen in order to reuse as much existing code as possible (no new
     opcodes are needed and the interpreter remains unchanged). Each 'case <expr> { ... }'
     construct is converted into 'if <switch expr> == <case expr> { ... }' with else blocks
-    created and filled in as necessary. No new opcodes are needed.
+    created and filled in as necessary.
 
   Caveats:
 
@@ -43,7 +43,7 @@ a) A case (switch) statement
   Testing:
 
     Tested in the 'test.lua' automated test suite. The 'switch' tests benefit from the existing
-    'if' tests because they share the same compiler and runtime.
+    'if' tests because they share the same compiler and runtime execution paths.
 
 b) Strings
 
@@ -57,27 +57,29 @@ b) Strings
 
     Double-quotes are used. Single quotes are not supported. Multi-line strings are allowed.
 
-    The usual escape sequences \a, \b, \f, \n, \r, \t, and \v may be used. The double quote
-    can be escaped using \" and the forward slash can be escaped using \\.
+    The usual two-byte escape sequences \a, \b, \f, \n, \r, \t, and \v may be used to represent
+    their one-byte counterparts. The double quote can be escaped using \" and the forward slash
+    can be escaped using \\.
 
-    Arbitrary bytes can be used with a \xYY sequence where YY is a two-digit hexadecimal
+    An arbitrary byte is represented by a \xYY sequence where YY is a two-digit hexadecimal
     number. For convenience, \z is shorthand for \x00.
 
     Interpolation of expressions within strings is accomplished with backticks. Expressions
-    are evaluated in place and their result replaces the backtick sequence.
+    are evaluated in place and their result replaces the backtick sequence. A backtick can be
+    escaped using \`.
 
   Implementation:
 
     Added a new 'string' grammar rule with sub-rules for escapes and embedded/interpolated
-    expressions. The parser captures chunks of the string and places them inside a new
-    'string' node. These chunks are escape sequences (which have already been transformed
-    into the correct characters/bytes by LPeg), embedded/interpolated expressions (yet to
-    be evaluated), and non-escaped (plain) text. The compiler then adds instructions to push
-    these chunks or expressions to the stack and then concatenate the results into a single
-    string result. A new 'concat' opcode helps facilitate this. It needs to know how many stack
-    values to concatenate. When the interpreter encounters this new opcode, it pops off the
-    requested number of stack values, inserts them into a table in reverse-order, and then uses
-    'table.concat()' to concatenate them into a single string and pushes the result onto the stack.
+    expressions. The parser captures chunks of the string and places them inside a new 'string'
+    node. These chunks are escape sequences (which have already been transformed into the
+    correct characters/bytes by LPeg), embedded/interpolated expressions (yet to be evaluated),
+    and non-escaped (plain) text. The compiler then adds instructions to push these chunks or
+    expressions to the stack and then concatenate the results into a single string result. A new
+    'concat' opcode along with how many stack values to concatenate helps facilitate this. When
+    the interpreter encounters this new opcode, it pops off the requested number of stack values,
+    inserts them into a table in reverse-order, uses 'table.concat()' to concatenate them into
+    a single string, and then pushes the result onto the stack.
 
     In the event a simple string is pushed, the compiler does not add a 'concat' opcode. In
     the event a string is comprised entirely of a single interpolated expression, the 'concat'
@@ -93,12 +95,12 @@ b) Strings
 
     The compiler then adds instructions for pushing the first string value, evaluating the
     second expression, pushing the third string value, and then concatenating the previous 3
-    values, the chunks that comprise the string.
+    values, the chunks that comprise the entire string.
 
-    When the interpreter enconters this series of instructions, it pushes "1 + 2 " onto the
+    When the interpreter encounters this series of instructions, it pushes "1 + 2 " onto the
     stack, evaluates the expression "1 + 2" (leaving its result on the stack), pushes "!" onto
     the stack, pops those 3 values off the stack, concatenates them (in reverse order of popping),
-    and pushes the result back onto the stack: "1 + 2 = 3!"
+    and finally pushes the result back onto the stack: "1 + 2 = 3!"
 
   Testing:
 
@@ -110,15 +112,15 @@ c) String concatenation
 
     "foo" .. "bar"
 
-    The concatenation operator, '..', has the same precedence as Lua's operator: after the addition
-    operators and before the comparison operators.
+    The concatenation operator, '..', has the same precedence as Lua's concatenation operator:
+    after the addition operators and before the comparison operators.
 
   Implementation:
 
     Added a new 'concat' grammar rule and inserted it between the existing 'add' and 'cmp'
     expression rules. Unlike Lua's concatenation operator, this operator is left-associative. It
-    was chosen to be this way for the sake of simplicity and being able to use 'lpeg.Cf()'
-    with the existing 'binop' fold function.
+    was chosen to be this way for the sake of simplicity, mimicking the other left-associative
+    binary operators.
 
     The concatenation operator makes use of the new 'concat' opcode and interpreter evaluation
     routines mentioned above. It also leverages the compiler's existing framework for binary
@@ -130,7 +132,7 @@ c) String concatenation
 
   Testing:
 
-    Tested in 'test.lua' automated test suite.
+    Tested in the 'test.lua' automated test suite.
 
 d) Substring extraction
 
@@ -146,8 +148,8 @@ d) Substring extraction
     s[:] --> foo
 
     Strings can be indexed with a single integer index or a range of indices. Negative indices
-    count from the end of the string. The start and end positions of a range are optional and
-    default to 1 and -1, respectively.
+    are allowed and count from the end of the string. The start and end positions of a range
+    are optional and default to 1 and -1, respectively.
 
   Implementation:
 
