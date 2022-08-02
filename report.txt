@@ -68,16 +68,16 @@ b) Strings
 
   Implementation:
 
-    Added a new 'string' grammar rule with sub-rules for escapes and embedded expressions. The
-    parser captures chunks of the string and places them inside a new 'string' node. These chunks
-    are escape sequences (which have already been transformed into the correct characters/bytes
-    by LPeg), embedded expressions (yet to be evaluated), and non-escaped (plain) text. The
-    compiler then adds instructions to push these chunks or expressions to the stack and then
-    concatenate the results into a single string result. A new 'concat' opcode helps facilitate
-    this. It needs to know how many stack values to concatenate. When the interpreter encounters
-    this new opcode, it pops off the requested number of stack values, inserts them into a
-    table in reverse-order, and then uses 'table.concat()' to concatenate them into a single
-    string and pushes the result onto the stack.
+    Added a new 'string' grammar rule with sub-rules for escapes and embedded/interpolated
+    expressions. The parser captures chunks of the string and places them inside a new
+    'string' node. These chunks are escape sequences (which have already been transformed
+    into the correct characters/bytes by LPeg), embedded/interpolated expressions (yet to
+    be evaluated), and non-escaped (plain) text. The compiler then adds instructions to push
+    these chunks or expressions to the stack and then concatenate the results into a single
+    string result. A new 'concat' opcode helps facilitate this. It needs to know how many stack
+    values to concatenate. When the interpreter encounters this new opcode, it pops off the
+    requested number of stack values, inserts them into a table in reverse-order, and then uses
+    'table.concat()' to concatenate them into a single string and pushes the result onto the stack.
 
     In the event a simple string is pushed, the compiler does not add a 'concat' opcode. In
     the event a string is comprised entirely of a single interpolated expression, the 'concat'

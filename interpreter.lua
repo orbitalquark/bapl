@@ -37,9 +37,7 @@ function grammar:parse(input)
       return {tag = tag, left = left, op = op, right = right}
     end
     -- Folded version of node().
-    function fnode(tag, patt)
-      return Cf(patt, function(left, op, right) return binop_node(tag, left, op, right) end)
-    end
+    function fnode(tag, patt) return Cf(patt, function(...) return binop_node(tag, ...) end) end
     -- Folds an if-elseif-else statement, with elseif being optional.
     -- if {...} elseif {...} is transformed into if {...} else { if {...} }.
     -- Note: an if by itself does not need folding.
@@ -56,12 +54,12 @@ function grammar:parse(input)
     -- Note: a switch by itself does not need folding; it is a no-op.
     function fold_switch(node, new)
       if new.expr then new.expr = binop_node('binop', node.expr, '==', new.expr) end
-      if node.body then
-        fold_if(node.body, new) -- continue if statement
-        return node
+      if not node.if_node then
+        if new.tag == 'else' then new = new.block end
+        node.if_node = new -- either a new if node or statement(s) from else/default block
+      else
+        fold_if(node.if_node, new) -- continue adding cases to if statement
       end
-      if new.tag == 'else' then new = new.block end
-      node.body = new -- either {tag = 'if' ... } or statement(s) from else block
       return node
     end
 
@@ -71,13 +69,13 @@ function grammar:parse(input)
       -- Whitespace and comments.
       space = (locale.space + V('comment'))^0 * V('save_pos'),
       comment = '#{' * (P(1) - '#}')^0 * '#}' + '#' * (P(1) - '\n')^0,
-      -- comment = node('comment', field('text', '#{' * (P(1) - '#}')^0 * '#}' + '#' * (P(1) - '\n')^0)),
-      
+
       -- Basic patterns.
       identifier = C(Cmt((alpha + '_') * (alnum + '_')^0, function(_, _, word)
         if reserved_words[word] then return false end
         return true, word
-      end)) * space, variable = node('variable', field('id', V('identifier'))),
+      end)) * space, --
+      variable = node('variable', field('id', V('identifier'))), --
       hex_num = '0' * S('xX') * xdigit^1,
       dec_num = digit^1 * ('.' * digit^1)^-1 * (S('eE') * S('+-')^-1 * digit^1)^-1,
       number = node('number', field('value', (V('hex_num') + V('dec_num')) / tonumber)),
@@ -85,13 +83,13 @@ function grammar:parse(input)
       
       -- Strings.
       string = node('string',
-        '"' * Cg((V('char_esc') + V('hex_esc') + V('emb_expr') + V('chars')))^0 * '"'),
-      char_esc = '\\' * C(S('abfnrtvz"\\`')) /
+        '"' * Cg(V('escape') + V('hex_char') + V('interpolated') + V('chars'))^0 * '"'),
+      escape = '\\' * C(S('abfnrtvz"\\`')) /
         setmetatable({
           a = '\a', b = '\b', f = '\f', n = '\n', r = '\r', t = '\t', v = '\v', z = '\z'
         }, {__index = function(_, k) return k end}),
-      hex_esc = Cs(P('\\') / '0' * 'x' * xdigit * xdigit) / tonumber / string.char,
-      emb_expr = '`' * V('expr') * '`', --
+      hex_char = Cs(P('\\') / '0' * 'x' * xdigit * xdigit) / tonumber / string.char,
+      interpolated = '`' * V('expr') * '`', --
       chars = (P(1) - S('"\\`'))^1,
 
       -- Expressions in order of precedence.
@@ -103,13 +101,12 @@ function grammar:parse(input)
       parens = token('(') * V('expr') * token(')'),
       unary = node('unop', field('op', op(S('-!'))) * field('expr', V('exp'))),
       exp = node('binop',
-        field('left', V('primary')) * (field('op', op('^')) * field('right', V('exp'))))^1 +
+        field('left', V('primary')) * (field('op', op('^')) * field('right', V('exp')))) +
         V('primary'), -- right-associative, so cannot use fnode('binop', ...)
       mul = fnode('binop', V('exp') * Cg(op(S('*/%')) * V('exp'))^0),
       add = fnode('binop', V('mul') * Cg(op(S('+-')) * V('mul'))^0),
       concat = fnode('binop', V('add') * Cg(op('..') * V('add'))^0),
-      cmp = fnode('binop',
-        V('concat') * Cg(op(P('>=') + '>' + '<=' + '<' + '==' + '!=') * V('concat'))^0),
+      cmp = fnode('binop', V('concat') * Cg(op(S('><') * P('=')^-1 + S('!=') * '=') * V('concat'))^0),
       land = fnode('logop', V('cmp') * Cg(op('and') * V('cmp'))^0),
       lor = fnode('logop', V('land') * Cg(op('or') * V('land'))^0), --
       expr = V('lor'),
@@ -122,11 +119,11 @@ function grammar:parse(input)
         V('return'),
       ['if'] = Cf(
         node('if', reserved('if') * field('expr', V('expr')) * field('block', V('block'))) *
-          (node('if', reserved('elseif') * field('expr', V('expr')) * field('block', V('block'))))^0 *
-          (node('else', reserved('else') * field('block', V('block'))))^-1, fold_if),
+          node('if', reserved('elseif') * field('expr', V('expr')) * field('block', V('block')))^0 *
+          node('else', reserved('else') * field('block', V('block')))^-1, fold_if),
       switch = Cf(node('switch', reserved('switch') * field('expr', V('expr'))) *
-        (node('if', reserved('case') * field('expr', V('expr')) * field('block', V('block'))))^0 *
-        (node('else', reserved('else') * field('block', V('block'))))^-1, fold_switch),
+        node('if', reserved('case') * field('expr', V('expr')) * field('block', V('block')))^0 *
+        node('else', reserved('else') * field('block', V('block')))^-1, fold_switch),
       ['while'] = node('while',
         reserved('while') * field('expr', V('expr')) * field('block', V('block'))),
       assign = node('assign', field('id', V('identifier')) * token('=') * field('expr', V('expr'))),
@@ -147,8 +144,7 @@ function grammar:parse(input)
 
   local ast = self._grammar:match(input)
   if not ast then
-    local parsed = input:sub(1, self._max_pos - 1)
-    if parsed:find('\n$') then parsed = parsed:sub(1, -2) end -- chomp
+    local parsed = input:sub(1, self._max_pos - 1):gsub('\n?$', '') -- chomp
     local line = select(2, parsed:gsub('\n', '\n')) + 1
     local s, e = parsed:find('[^\n]*$')
     local col = e - s + 2 -- blame col of next char
@@ -199,17 +195,17 @@ local opcodes = {}
 function opcodes.new(ast)
   local codes = setmetatable({}, {__index = opcodes})
   codes:_add_stat(ast)
-  -- Add implicit 'return 0' statement
+  -- Add implicit 'return 0' statement.
   codes:_add(PUSH, 0)
   codes:_add(RET)
   return codes
 end
 
--- Adds the given opcode and optional value to the list.
+-- Adds the given opcode and optional value(s) to the list.
 -- @param op Opcode to add.
--- @param ... Optional values for `op`, such as a number to push or variable to store or load.
+-- @param ... Optional value(s) for `op`, such as a number to push or variable to store or load.
 function opcodes:_add(op, ...)
-  table.insert(self, (assert(op, 'attemp to add nil op')))
+  table.insert(self, (assert(op, 'attempt to add nil op')))
   for _, value in ipairs({...}) do if value then table.insert(self, value) end end
 end
 
@@ -218,32 +214,31 @@ end
 -- @param can_create Flag that indicates whether or not an ID can be created. If `false` and
 --  there is no numeric ID is available, raises an error for the undefined variable.
 function opcodes:_variable_id(id, can_create)
-  if not self.vars then self.vars = {} end
-  if not self.vars[id] and can_create then
-    table.insert(self.vars, id)
-    self.vars[id] = #self.vars
+  if not self._vars then self._vars = {} end
+  if not self._vars[id] and can_create then
+    table.insert(self._vars, id)
+    self._vars[id] = #self._vars
   end
-  return (assert(self.vars[id], 'undefined variable: ' .. id))
+  return (assert(self._vars[id], 'undefined variable: ' .. id))
 end
 
-local bin_opcodes = {
-  ['+'] = ADD, ['-'] = SUB, ['*'] = MUL, ['/'] = DIV, ['%'] = MOD, ['^'] = POW, ['>='] = GTE,
-  ['>'] = GT, ['<='] = LTE, ['<'] = LT, ['=='] = EQ, ['!='] = NE, ['..'] = CONCAT
-}
-local un_opcodes = {['-'] = UNM, ['!'] = NOT}
-local log_opcodes = {['and'] = JMPZP, ['or'] = JMPNZP}
-
--- Adds the opcodes for the given expression to the list.
+-- Adds the opcodes for the given expression node to the list.
 -- @param node Abstract syntax tree node of the expression to add.
 function opcodes:_add_expr(node)
   if not self._dispatch_add_expr then
+    local bin_opcodes = {
+      ['+'] = ADD, ['-'] = SUB, ['*'] = MUL, ['/'] = DIV, ['%'] = MOD, ['^'] = POW, ['>='] = GTE,
+      ['>'] = GT, ['<='] = LTE, ['<'] = LT, ['=='] = EQ, ['!='] = NE, ['..'] = CONCAT
+    }
+    local un_opcodes = {['-'] = UNM, ['!'] = NOT}
+    local log_opcodes = {['and'] = JMPZP, ['or'] = JMPNZP}
     self._dispatch_add_expr = setmetatable({
       number = function(self, node) self:_add(PUSH, node.value) end,
       variable = function(self, node) self:_add(LOAD, self:_variable_id(node.id)) end,
       binop = function(self, node)
         self:_add_expr(node.left)
         self:_add_expr(node.right)
-        self:_add(bin_opcodes[node.op], node.op == '..' and 2)
+        self:_add(bin_opcodes[node.op], node.op == '..' and 2 --[[CONCAT 2]] or nil)
       end, --
       unop = function(self, node)
         self:_add_expr(node.expr)
@@ -258,7 +253,7 @@ function opcodes:_add_expr(node)
       string = function(self, node)
         for i, chunk in ipairs(node) do
           if type(chunk) == 'table' then
-            self:_add_expr(chunk)
+            self:_add_expr(chunk) -- interpolated expression
           else
             self:_add(PUSH, chunk)
           end
@@ -270,8 +265,8 @@ function opcodes:_add_expr(node)
         if node.value then
           self:_add(INDEX, node.value)
         else
-          if node.start == '' then node.start = 1 end
-          if node['end'] == '' then node['end'] = -1 end
+          if node.start == '' then node.start = 1 end -- TODO: set this in grammar?
+          if node['end'] == '' then node['end'] = -1 end -- TODO: set this in grammar?
           self:_add(SUBSTR, node.start, node['end'])
         end
       end --
@@ -299,7 +294,7 @@ function opcodes:_jump_end(id)
   self[id] = #self - id
 end
 
--- Adds the opcodes for the given statement to the list.
+-- Adds the opcodes for the given statement node to the list.
 -- @param node Abstract syntax tree node of the statement to add.
 function opcodes:_add_stat(node)
   if not self._dispatch_add_stat then
@@ -324,13 +319,13 @@ function opcodes:_add_stat(node)
         self:_add_expr(node.expr)
         local over_if = self:_jump_start(JMPZ)
         self:_add_stat(node.block)
-        if not node.block_else then
-          self:_jump_end(over_if) -- expr was false
-        else
+        if node.block_else then
           local over_else = self:_jump_start(JMP)
-          self:_jump_end(over_if) -- jump into else block (expr was false)
+          self:_jump_end(over_if) -- jump into else block if expr is false
           self:_add_stat(node.block_else)
-          self:_jump_end(over_else) -- expr was true
+          self:_jump_end(over_else) -- jump over else block if expr is true
+        else
+          self:_jump_end(over_if) -- jump over block if expr is false
         end
       end, --
       ['while'] = function(self, node)
@@ -338,10 +333,10 @@ function opcodes:_add_stat(node)
         self:_add_expr(node.expr)
         local over_while = self:_jump_start(JMPZ)
         self:_add_stat(node.block)
-        self:_jump_start(JMP, to_expr)
-        self:_jump_end(over_while) -- expr was false
+        self:_jump_start(JMP, to_expr) -- jump back to expr in while block
+        self:_jump_end(over_while) -- jump out of while block if expr is false
       end, --
-      switch = function(self, node) if node.body then self:_add_stat(node.body) end end,
+      switch = function(self, node) if node.if_node then self:_add_stat(node.if_node) end end,
       empty = function() end -- no-op
     }, {__index = function(_, tag) error('unknown stat tag: ' .. tag) end})
   end
@@ -375,11 +370,13 @@ function stack:pop() return table.remove(self) end
 -- Stack machine.
 local machine = {}
 
+---
 -- Returns a new stack machine.
 function machine.new() return setmetatable({}, {__index = machine}) end
 
-local _print = print -- for @ statement so that it is never silenced.
+local _print = print -- for @ statement so that it is never silenced
 
+---
 -- Executes the given list of opcodes on this machine and returns the result (the value at the
 -- top of the stack).
 -- @param opcodes List of opcodes to execute.
@@ -421,20 +418,20 @@ function machine:run(opcodes)
           for i = 1, n do table.insert(chunks, 1, stack:pop()) end
           stack:push(table.concat(chunks))
         elseif type(stack:top()) ~= 'string' then
-          stack:push(tostring(stack:pop()))
+          stack:push(tostring(stack:pop())) -- interpolated expression result
         end
       end, --
       [INDEX] = function()
         local i = opcodes:next()
         print(INDEX, i)
         local value, value_type = self:_assert_indexible(stack:pop())
-        if value_type == 'string' then stack:push(string.sub(value, i, i)) end
+        stack:push(string.sub(value, i, i))
       end, --
       [SUBSTR] = function()
         local s, e = opcodes:next(), opcodes:next()
         print(SUBSTR, s, e)
         local value, value_type = self:_assert_indexible(stack:pop())
-        if value_type == 'string' then stack:push(string.sub(value, s, e)) end
+        stack:push(string.sub(value, s, e))
       end --
     }, {{__index = function(_, opcode) error('unknown instruction: ' .. opcode) end}})
 
@@ -470,7 +467,7 @@ function machine:run(opcodes)
       end
     end
 
-    for opcode in pairs{[JMP] = true, [JMPZ] = true, [JMPZP] = true, [JMPNZP] = true} do
+    for _, opcode in ipairs{JMP, JMPZ, JMPZP, JMPNZP} do
       self._dispatch[opcode] = function()
         local rel = opcodes:next()
         print(opcode, rel)
@@ -480,13 +477,14 @@ function machine:run(opcodes)
         local pop = opcode == JMPZ or (opcode == JMPZP and not zero) or (opcode == JMPNZP and zero)
         if jump then opcodes:jump(rel) end
         if pop then
-          print('pop') -- not an opcode, but verify pop op
+          print('pop') -- not an opcode, but verify pop operation
           stack:pop()
         end
       end
     end
   end
 
+  -- Execute instructions.
   while true do if self._dispatch[opcodes:next()]() then break end end
 
   return stack:pop()
@@ -502,9 +500,11 @@ end
 -- ===============================================================================================--
 -- Module.
 
+---
 -- Interpreter module.
 local M = {grammar = grammar.new()}
 
+---
 -- Runs the given input code and returns its result.
 -- @param input Input code to run.
 -- @param verbose Optional flag that indicates whether or not print debug info when running. Debug
