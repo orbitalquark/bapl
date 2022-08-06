@@ -36,8 +36,15 @@ function grammar:parse(input)
     local function binop_node(tag, left, op, right)
       return {tag = tag, left = left, op = op, right = right}
     end
+    local function index_node(tag, variable, expr, expr2)
+      return {tag = tag, variable = variable, expr = expr, expr2 = expr2}
+    end
     -- Folded version of node().
-    function fnode(tag, patt) return Cf(patt, function(...) return binop_node(tag, ...) end) end
+    function fnode(tag, patt)
+      return Cf(patt, function(...)
+        return tag:find('op$') and binop_node(tag, ...) or index_node(tag, ...)
+      end)
+    end
     -- Folds an if-elseif-else statement, with elseif being optional.
     -- if {...} elseif {...} is transformed into if {...} else { if {...} }.
     -- Note: an if by itself does not need folding.
@@ -93,10 +100,13 @@ function grammar:parse(input)
 
       -- Expressions in order of precedence.
       primary = V('postfix') + V('variable') + V('number') + V('string') + V('parens') + V('unary'),
-      postfix = V('index'), --
-      index = node('index', field('id', V('identifier')) * token('[') *
-        (field('start', V('expr')^-1) * token(':') * field('end', V('expr')^-1) +
-          field('expr', V('expr'))) * token(']')), --
+      postfix = V('new') + V('index') + V('range'), --
+      new = node('new', reserved('new') * Cg(token('[') * V('expr') * token(']'))^1),
+      index = fnode('index', V('variable') * Cg(token('[') * V('expr') * token(']'))^1),
+      range = fnode('range',
+        V('variable') *
+          Cg(token('[') * (V('expr') + node('number', field('value', Cc(1)))) * token(':') *
+            (V('expr') + node('number', field('value', Cc(-1)))) * token(']'))^1), --
       parens = token('(') * V('expr') * token(')'),
       unary = node('unop', field('op', op(S('-!'))) * field('expr', V('exp'))),
       exp = node('binop',
@@ -125,8 +135,8 @@ function grammar:parse(input)
         node('else', reserved('else') * field('block', V('block')))^-1, fold_switch),
       ['while'] = node('while',
         reserved('while') * field('expr', V('expr')) * field('block', V('block'))),
-      assign = node('assign', field('id', V('identifier')) * token('=') * field('expr', V('expr'))),
-      print = node('print', token('@') * field('expr', V('expr'))),
+      assign = node('assign', (field('variable', V('index') + V('variable'))) * token('=') *
+        field('expr', V('expr'))), print = node('print', token('@') * field('expr', V('expr'))),
       ['return'] = node('return', reserved('return') * field('expr', V('expr'))),
 
       -- Utility.
@@ -183,6 +193,8 @@ local JMPNZP = 'jmpnzp'
 local CONCAT = 'concat'
 local INDEX = 'index'
 local SUBSTR = 'substr'
+local NEW = 'new'
+local SETINDEX = 'setindex'
 
 -- List of opcodes for a stack machine.
 local opcodes = {}
@@ -260,23 +272,19 @@ function opcodes:_add_expr(node)
         if #node > 1 or type(node[1]) ~= 'string' then self:_add(CONCAT, #node) end
       end, --
       index = function(self, node)
-        self:_add(LOAD, self:_variable_id(node.id))
-        if node.expr then
-          self:_add_expr(node.expr)
-          self:_add(INDEX)
-        else
-          if node.start == '' then
-            self:_add(PUSH, 1)
-          else
-            self:_add_expr(node.start)
-          end
-          if node['end'] == '' then
-            self:_add(PUSH, -1)
-          else
-            self:_add_expr(node['end'])
-          end
-          self:_add(SUBSTR)
-        end
+        self:_add_expr(node.variable)
+        self:_add_expr(node.expr)
+        self:_add(INDEX)
+      end, --
+      range = function(self, node)
+        self:_add_expr(node.variable)
+        self:_add_expr(node.expr) -- start
+        self:_add_expr(node.expr2) -- end
+        self:_add(SUBSTR)
+      end, --
+      new = function(self, node)
+        for _, size in ipairs(node) do self:_add_expr(size) end
+        self:_add(NEW, #node)
       end --
     }, {__index = function(_, tag) error('unknown expr tag: ' .. tag) end})
   end
@@ -308,8 +316,15 @@ function opcodes:_add_stat(node)
   if not self._dispatch_add_stat then
     self._dispatch_add_stat = setmetatable({
       assign = function(self, node)
-        self:_add_expr(node.expr)
-        self:_add(STORE, self:_variable_id(node.id, true))
+        if node.variable.tag ~= 'index' then
+          self:_add_expr(node.expr)
+          self:_add(STORE, self:_variable_id(node.variable.id, true))
+        else
+          self:_add_expr(node.variable.variable)
+          self:_add_expr(node.variable.expr)
+          self:_add_expr(node.expr)
+          self:_add(SETINDEX)
+        end
       end, --
       seq = function(self, node)
         self:_add_stat(node.left)
@@ -416,7 +431,7 @@ function machine:run(opcodes)
       [PRINT] = function()
         local value = stack:pop()
         print(PRINT, value)
-        _print(value)
+        _print(type(value) ~= 'table' and value or pt.pt(value))
       end, --
       [CONCAT] = function()
         local n = opcodes:next()
@@ -430,17 +445,45 @@ function machine:run(opcodes)
         end
       end, --
       [INDEX] = function()
-        local i = assert(math.tointeger(stack:pop()), 'invalid index')
+        local i = self:_assert_int(stack:pop(), 'invalid index')
         print(INDEX, i)
         local value, value_type = self:_assert_indexible(stack:pop())
-        stack:push(string.sub(value, i, i))
+        assert(i <= #value, 'index out of range')
+        stack:push(value_type == 'string' and string.sub(value, i, i) or value[i])
       end, --
       [SUBSTR] = function()
-        local e = assert(math.tointeger(stack:pop()), 'invalid range end')
-        local s = assert(math.tointeger(stack:pop()), 'invalid range start')
+        local e = self:_assert_int(stack:pop(), 'invalid range end')
+        local s = self:_assert_int(stack:pop(), 'invalid range start')
         print(SUBSTR, s, e)
         local value, value_type = self:_assert_indexible(stack:pop())
         stack:push(string.sub(value, s, e))
+      end, --
+      [NEW] = function()
+        local n = opcodes:next()
+        print(NEW, n)
+        local dims = {}
+        for i = 1, n do table.insert(dims, 1, self:_assert_int(stack:pop(), 'invalid size')) end
+        local function new_array(size)
+          return setmetatable({n = size}, {__len = function(t) return t.n end})
+        end
+        local function add_dimension(t, n)
+          if n > #dims then return end
+          for i = 1, #t do
+            t[i] = new_array(dims[n])
+            add_dimension(t[i], n + 1)
+          end
+        end
+        local t = new_array(dims[1])
+        if #dims > 1 then add_dimension(t, 2) end
+        stack:push(t)
+      end, --
+      [SETINDEX] = function()
+        local value = stack:pop()
+        local i = self:_assert_int(stack:pop(), 'invalid index')
+        local array = stack:pop()
+        assert(type(array) == 'table', 'cannot set index for non-array value')
+        print(SETINDEX, '<array>', i, value)
+        array[i] = value
       end --
     }, {{__index = function(_, opcode) error('unknown instruction: ' .. opcode) end}})
 
@@ -500,10 +543,17 @@ function machine:run(opcodes)
   return stack:pop()
 end
 
+-- Asserts the given value is an integer type and returns that value.
+function machine:_assert_int(value, message)
+  return (assert(math.tointeger(value), message))
+end
+
 -- Asserts the given value is of an indexible type and returns that value and its type.
 function machine:_assert_indexible(value)
   local value_type = type(value)
-  if value_type ~= 'string' then error(string.format('cannot index %s value', value_type)) end
+  if value_type ~= 'string' and value_type ~= 'table' then
+    error(string.format('cannot index %s value', value_type))
+  end
   return value, value_type
 end
 
@@ -524,11 +574,11 @@ function M.run(input, verbose)
   print = function(...) if verbose then _print(...) end end
 
   print(input)
-  local ok, result = pcall(function()
+  local ok, result = xpcall(function()
     local ast = M.grammar:parse(input)
     print(pt.pt(ast))
     return machine.new():run(opcodes.new(ast))
-  end)
+  end, debug.traceback)
 
   print = _print -- restore
   return assert(ok and result, result)

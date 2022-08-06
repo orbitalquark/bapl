@@ -146,6 +146,7 @@ d) Substring extraction
     s[:2] --> fo
     s[:-1] --> foo
     s[:] --> foo
+    s[:][2:] --> fo
 
     Strings can be indexed with a single integer index or a range of indices. Negative indices
     are allowed and count from the end of the string. The start and end positions of a range
@@ -154,21 +155,22 @@ d) Substring extraction
 
   Implementation:
 
-    Added a new 'index' grammar rule and added it to a new 'postfix' rule that has the highest
-    priority. The 'index' rule looks for a variable name followed by a bracketed expression
-    that contains either a single index, or a range of indices separated by a ':' token. New
-    'index' and 'substr' opcodes are used to perform the indexing.
+    Added a new 'range' grammar rule as an alternative to the existing 'index' rule (which now
+    recognizes strings in addition to arrays). That 'range' rule looks for one or more sequences
+    of range of indices separated by a ':' token. The existing 'index' opcode and a new 'substr'
+    opcodes are used to perform the indexing and "substringing," respectively.
 
-    The parser produces a new 'index' node that contains the variable to index, and either a
-    single index or range of indices to use.
+    The parser produces a new 'range' node that contains 'start' and 'end' fields for substring
+    expressions.
 
-    The compiler then adds instructions to load a given variable and either index it at a
-    particular position, or obtain a substring from a position range.
+    The compiler keeps the existing instructions for indexing a variable and adds instructions
+    to load a given variable and obtain a substring from a position range.
 
-    When the interpreter encounters an 'index' or 'substr' opcode, it pops index or substring
-    range off the stack, verifies that it is/they are integers, pops the variable's value off
-    the stack, verifies that it is a string, performs the requested operation, and then pushes
-    the result onto the stack.
+    When the interpreter encounters the 'index' opcode, it performs a string index if the
+    variable's type is a string (as opposed to a table/array).  When it encounters the 'substr'
+    opcode, it pops the substring range off the stack, verifies that it's composed of integers,
+    pops the variable's value off the stack, verifies that it is a string, performs the substring
+    operation, and then pushes the result onto the stack.
 
   Caveats:
 
