@@ -149,13 +149,14 @@ d) Substring extraction
 
     Strings can be indexed with a single integer index or a range of indices. Negative indices
     are allowed and count from the end of the string. The start and end positions of a range
-    are optional and default to 1 and -1, respectively.
+    are optional and default to 1 and -1, respectively. Expressions that evaluate to indices
+    are allowed.
 
   Implementation:
 
     Added a new 'index' grammar rule and added it to a new 'postfix' rule that has the highest
-    priority. The 'index' rule looks for a variable name followed by a bracketed expression that
-    contains either a single integer index, or a range of indices separated by a ':' token. New
+    priority. The 'index' rule looks for a variable name followed by a bracketed expression
+    that contains either a single index, or a range of indices separated by a ':' token. New
     'index' and 'substr' opcodes are used to perform the indexing.
 
     The parser produces a new 'index' node that contains the variable to index, and either a
@@ -164,9 +165,10 @@ d) Substring extraction
     The compiler then adds instructions to load a given variable and either index it at a
     particular position, or obtain a substring from a position range.
 
-    When the interpreter encounters an 'index' or 'substr' opcode, it pops the variable's value
-    off the stack, verifies that it is a string, performs the requested operation, and then
-    pushes the result onto the stack.
+    When the interpreter encounters an 'index' or 'substr' opcode, it pops index or substring
+    range off the stack, verifies that it is/they are integers, pops the variable's value off
+    the stack, verifies that it is a string, performs the requested operation, and then pushes
+    the result onto the stack.
 
   Caveats:
 

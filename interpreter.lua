@@ -79,8 +79,7 @@ function grammar:parse(input)
       hex_num = '0' * S('xX') * xdigit^1,
       dec_num = digit^1 * ('.' * digit^1)^-1 * (S('eE') * S('+-')^-1 * digit^1)^-1,
       number = node('number', field('value', (V('hex_num') + V('dec_num')) / tonumber)),
-      int = P('-')^-1 * digit^1 / tonumber, -- for indexes and ranges
-      
+
       -- Strings.
       string = node('string',
         '"' * Cg(V('escape') + V('hex_char') + V('interpolated') + V('chars'))^0 * '"'),
@@ -96,8 +95,8 @@ function grammar:parse(input)
       primary = V('postfix') + V('variable') + V('number') + V('string') + V('parens') + V('unary'),
       postfix = V('index'), --
       index = node('index', field('id', V('identifier')) * token('[') *
-        (field('start', V('int')^-1) * token(':') * field('end', V('int')^-1) +
-          field('value', V('int'))) * token(']')), --
+        (field('start', V('expr')^-1) * token(':') * field('end', V('expr')^-1) +
+          field('expr', V('expr'))) * token(']')), --
       parens = token('(') * V('expr') * token(')'),
       unary = node('unop', field('op', op(S('-!'))) * field('expr', V('exp'))),
       exp = node('binop',
@@ -262,12 +261,21 @@ function opcodes:_add_expr(node)
       end, --
       index = function(self, node)
         self:_add(LOAD, self:_variable_id(node.id))
-        if node.value then
-          self:_add(INDEX, node.value)
+        if node.expr then
+          self:_add_expr(node.expr)
+          self:_add(INDEX)
         else
-          if node.start == '' then node.start = 1 end -- TODO: set this in grammar?
-          if node['end'] == '' then node['end'] = -1 end -- TODO: set this in grammar?
-          self:_add(SUBSTR, node.start, node['end'])
+          if node.start == '' then
+            self:_add(PUSH, 1)
+          else
+            self:_add_expr(node.start)
+          end
+          if node['end'] == '' then
+            self:_add(PUSH, -1)
+          else
+            self:_add_expr(node['end'])
+          end
+          self:_add(SUBSTR)
         end
       end --
     }, {__index = function(_, tag) error('unknown expr tag: ' .. tag) end})
@@ -422,13 +430,14 @@ function machine:run(opcodes)
         end
       end, --
       [INDEX] = function()
-        local i = opcodes:next()
+        local i = assert(math.tointeger(stack:pop()), 'invalid index')
         print(INDEX, i)
         local value, value_type = self:_assert_indexible(stack:pop())
         stack:push(string.sub(value, i, i))
       end, --
       [SUBSTR] = function()
-        local s, e = opcodes:next(), opcodes:next()
+        local e = assert(math.tointeger(stack:pop()), 'invalid range end')
+        local s = assert(math.tointeger(stack:pop()), 'invalid range start')
         print(SUBSTR, s, e)
         local value, value_type = self:_assert_indexible(stack:pop())
         stack:push(string.sub(value, s, e))
@@ -485,7 +494,8 @@ function machine:run(opcodes)
   end
 
   -- Execute instructions.
-  while true do if self._dispatch[opcodes:next()]() then break end end
+  local dispatch = self._dispatch
+  while true do if dispatch[opcodes:next()]() then break end end
 
   return stack:pop()
 end
