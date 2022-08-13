@@ -1,13 +1,21 @@
 local interpreter = require('interpreter')
 
+-- Tests the given program returns the given expectedvalue.
+-- @param prog List of functions that constitute the program to run.
+-- @param expected Value expected to be returned by `prog`.
+-- @param verbose Optional flag that indicates whether or not to print debug info.
+local function test_prog(prog, expected, verbose)
+  local actual = interpreter.run(prog, verbose)
+  assert(expected, 'expected result not given')
+  assert(actual == expected, string.format("%s == %q (expected %q)", stat, actual, expected))
+end
+
 -- Tests the given statement returns the given expected value.
 -- @param stat Statement or list of statements to run.
 -- @param expected Value expected to be returned by `stat`.
 -- @param verbose Optional flag that indicates whether or not to print debug info.
 local function test_stat(stat, expected, verbose)
-  local actual = interpreter.run(stat, verbose)
-  assert(expected, 'expected result not given')
-  assert(actual == expected, string.format("%s == %q (expected %q)", stat, actual, expected))
+  test_prog('function main() {\n' .. stat .. '\n}', expected, verbose)
 end
 
 -- Tests the given expression returns an optional expected value.
@@ -93,17 +101,17 @@ assert(not ok and err:find('undefined variable: y'), 'expected "undefined variab
 
 -- Test syntax error.
 ok, err = pcall(test_stat, 'oops!')
-assert(not ok and err:find('syntax error at line 1, col 5'))
+assert(not ok and err:find('syntax error at line 2, col 5')) -- TODO: was line 1 prior to function main() { ... }
 ok, err = pcall(test_stat, [[
 x = 1;
 oops!]])
-assert(not ok and err:find('syntax error at line 2, col 5'))
+assert(not ok and err:find('syntax error at line 3, col 5')) -- TODO: was line 2 prior to function main() { ... }
 ok, err = pcall(test_stat, [[
 x = 1;
 y = 2
 return x + y
 ]])
-assert(not ok and err:find('syntax error at line 2, col 6'))
+assert(not ok and err:find('syntax error at line 3, col 6')) -- TODO: was line 2 prior to function main() { ... }
 
 -- Test comments.
 test_stat([[
@@ -239,5 +247,29 @@ ok, err = pcall(test_stat, 'x=new[1];return x[2]')
 assert(not ok and err:find('index out of range'))
 ok, err = pcall(test_stat, 'x=1;x[1]=2')
 assert(not ok and err:find('cannot set index for non%-array value'))
+
+-- Test functions.
+test_prog('function foo(){}function main(){}', 0)
+test_prog('function foo() { return 1 } function main() { return foo() }', 1)
+test_prog('function foo() { return 1 } function main() { foo() }', 0)
+test_prog([[
+function foo();
+function bar() { return foo() }
+function foo() { return 1 }
+function main() { return bar() }]], 1)
+test_prog([[
+function foo() { return 1 }
+function main() { foo(); return foo() }]], 1)
+
+ok, err = pcall(test_prog, 'function main1() { return 1; }')
+assert(not ok and err:find('no main function'))
+ok, err = pcall(test_prog, 'function foo() {} function main() { x = foo; }')
+assert(not ok and err:find('cannot use function as variable'))
+ok, err = pcall(test_prog, 'function foo() {} function main() { foo = 1; }')
+assert(not ok and err:find('cannot use function as variable'))
+ok, err = pcall(test_prog, 'function main() { return foo() }')
+assert(not ok and err:find('undeclared function: foo'))
+ok, err = pcall(test_prog, 'function foo(); function main() { return foo() }')
+assert(not ok and err:find('undefined function: foo'))
 
 print('Passed')

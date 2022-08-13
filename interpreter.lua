@@ -71,7 +71,7 @@ function grammar:parse(input)
     end
 
     self._grammar = P{
-      V('reset_pos') * V('stats') * -1,
+      V('reset_pos') * Ct(V('func')^1) * -1,
 
       -- Whitespace and comments.
       space = (locale.space + V('comment'))^0 * V('save_pos'),
@@ -100,13 +100,14 @@ function grammar:parse(input)
 
       -- Expressions in order of precedence.
       primary = V('postfix') + V('variable') + V('number') + V('string') + V('parens') + V('unary'),
-      postfix = V('new') + V('index') + V('range'), --
+      postfix = V('new') + V('index') + V('range') + V('call'), --
       new = node('new', reserved('new') * Cg(token('[') * V('expr') * token(']'))^1),
       index = fnode('index', V('variable') * Cg(token('[') * V('expr') * token(']'))^1),
       range = fnode('range',
         V('variable') *
           Cg(token('[') * (V('expr') + node('number', field('value', Cc(1)))) * token(':') *
-            (V('expr') + node('number', field('value', Cc(-1)))) * token(']'))^1), --
+            (V('expr') + node('number', field('value', Cc(-1)))) * token(']'))^1),
+      call = node('call', field('id', V('identifier')) * token('(') * token(')')),
       parens = token('(') * V('expr') * token(')'),
       unary = node('unop', field('op', op(S('-!'))) * field('expr', V('exp'))),
       exp = node('binop',
@@ -121,10 +122,14 @@ function grammar:parse(input)
       expr = V('lor'),
 
       -- Statements.
-      block = token('{') * (V('stats') + node('empty', token(';')^0)) * token('}'),
+      func = node('func',
+        reserved('function') * field('id', V('identifier')) * token('(') * token(')') *
+          (field('block', V('block')) + ';')), --
+      block = node('block', field('block', token('{') * (V('stats') + node('empty', token(';')^0)) *
+        token('}'))),
       stats = node('seq', field('left', V('stat')) * (token(';')^1 * field('right', V('stats')))) +
         V('stat') * token(';')^-1,
-      stat = V('block') + V('if') + V('switch') + V('while') + V('assign') + V('print') +
+      stat = V('block') + V('if') + V('switch') + V('while') + V('call') + V('assign') + V('print') +
         V('return'),
       ['if'] = Cf(
         node('if', reserved('if') * field('expr', V('expr')) * field('block', V('block'))) *
@@ -136,7 +141,8 @@ function grammar:parse(input)
       ['while'] = node('while',
         reserved('while') * field('expr', V('expr')) * field('block', V('block'))),
       assign = node('assign', (field('variable', V('index') + V('variable'))) * token('=') *
-        field('expr', V('expr'))), print = node('print', token('@') * field('expr', V('expr'))),
+        field('expr', V('expr'))), --
+      print = node('print', token('@') * field('expr', V('expr'))),
       ['return'] = node('return', reserved('return') * field('expr', V('expr'))),
 
       -- Utility.
@@ -195,21 +201,32 @@ local INDEX = 'index'
 local SUBSTR = 'substr'
 local NEW = 'new'
 local SETINDEX = 'setindex'
+local CALL = 'call'
+local POP = 'pop'
 
 -- List of opcodes for a stack machine.
 local opcodes = {}
 
 ---
--- Creates a list of opcodes from the given Abstract syntax tree.
+-- Creates lists of opcodes from functions in the given Abstract syntax tree and returns the
+-- list of opcodes for the 'main' function.
 -- @param ast Abstract syntax tree to compile.
 -- @see grammar.parse
 function opcodes.new(ast)
-  local codes = setmetatable({}, {__index = opcodes})
-  codes:_add_stat(ast)
-  -- Add implicit 'return 0' statement.
-  codes:_add(PUSH, 0)
-  codes:_add(RET)
-  return codes
+  local functions = {}
+  for _, func in ipairs(ast) do
+    local codes = setmetatable({_functions = functions}, {__index = opcodes})
+    if func.block then
+      codes:_add_stat(func.block)
+      -- Add implicit 'return 0' statement.
+      codes:_add(PUSH, 0)
+      codes:_add(RET)
+    else
+      -- forward declaration
+    end
+    functions[func.id] = codes
+  end
+  return assert(functions.main, 'no main function')
 end
 
 -- Adds the given opcode and optional value(s) to the list.
@@ -225,6 +242,7 @@ end
 -- @param can_create Flag that indicates whether or not an ID can be created. If `false` and
 --  there is no numeric ID is available, raises an error for the undefined variable.
 function opcodes:_variable_id(id, can_create)
+  assert(not self._functions[id], 'cannot use function as variable')
   if not self._vars then self._vars = {} end
   if not self._vars[id] and can_create then
     table.insert(self._vars, id)
@@ -285,6 +303,10 @@ function opcodes:_add_expr(node)
       new = function(self, node)
         for _, size in ipairs(node) do self:_add_expr(size) end
         self:_add(NEW, #node)
+      end, --
+      call = function(self, node)
+        assert(self._functions[node.id], 'undeclared function: ' .. node.id)
+        self:_add(CALL, node.id)
       end --
     }, {__index = function(_, tag) error('unknown expr tag: ' .. tag) end})
   end
@@ -360,7 +382,13 @@ function opcodes:_add_stat(node)
         self:_jump_end(over_while) -- jump out of while block if expr is false
       end, --
       switch = function(self, node) if node.if_node then self:_add_stat(node.if_node) end end,
-      empty = function() end -- no-op
+      empty = function() end, -- no-op
+      call = function(self, node)
+        assert(self._functions[node.id], 'undeclared function: ' .. node.id)
+        self:_add(CALL, node.id)
+        self:_add(POP, 1)
+      end, --
+      block = function(self, node) self:_add_stat(node.block) end --
     }, {__index = function(_, tag) error('unknown stat tag: ' .. tag) end})
   end
   self._dispatch_add_stat[node.tag](self, node)
@@ -372,6 +400,16 @@ function opcodes:next()
   if not self.i then self.i = 0 end
   self.i = self.i + 1
   return self[self.i]
+end
+
+---
+-- Returns the list of opcodes for the given function.
+-- The stack machine can then run the returned codes, effectively calling the function.
+function opcodes:call(id)
+  local opcodes = assert(self._functions[id], 'undeclared function: ' .. id)
+  assert(#opcodes > 0, 'undefined function: ' .. id)
+  if opcodes.i then opcodes.i = 0 end -- reset
+  return opcodes
 end
 
 ---
@@ -409,129 +447,139 @@ function machine:run(opcodes)
   if not self._memory then self._memory = {} end
   if not self._stack then self._stack = stack.new() end
   local memory, stack = self._memory, self._stack
+  local top = #stack -- store for later sanity check that CALLs have not mismanaged the stack
 
-  if not self._dispatch then
-    self._dispatch = setmetatable({
-      [RET] = function() return true end, -- signal completion
-      [PUSH] = function()
-        local value = opcodes:next()
-        print(PUSH, value)
-        stack:push(value)
-      end, --
-      [LOAD] = function()
-        local id = opcodes:next()
-        print(LOAD, id)
-        stack:push(memory[id])
-      end, --
-      [STORE] = function()
-        local id = opcodes:next()
-        print(STORE, id)
-        memory[id] = stack:pop()
-      end, --
-      [PRINT] = function()
-        local value = stack:pop()
-        print(PRINT, value)
-        _print(type(value) ~= 'table' and value or pt.pt(value))
-      end, --
-      [CONCAT] = function()
-        local n = opcodes:next()
-        print(CONCAT, n)
-        if n > 1 then
-          local chunks = {}
-          for i = 1, n do table.insert(chunks, 1, stack:pop()) end
-          stack:push(table.concat(chunks))
-        elseif type(stack:top()) ~= 'string' then
-          stack:push(tostring(stack:pop())) -- interpolated expression result
-        end
-      end, --
-      [INDEX] = function()
-        local i = self:_assert_int(stack:pop(), 'invalid index')
-        print(INDEX, i)
-        local value, value_type = self:_assert_indexible(stack:pop())
-        assert(i <= #value, 'index out of range')
-        stack:push(value_type == 'string' and string.sub(value, i, i) or value[i])
-      end, --
-      [SUBSTR] = function()
-        local e = self:_assert_int(stack:pop(), 'invalid range end')
-        local s = self:_assert_int(stack:pop(), 'invalid range start')
-        print(SUBSTR, s, e)
-        local value, value_type = self:_assert_indexible(stack:pop())
-        stack:push(string.sub(value, s, e))
-      end, --
-      [NEW] = function()
-        local n = opcodes:next()
-        print(NEW, n)
-        local dims = {}
-        for i = 1, n do table.insert(dims, 1, self:_assert_int(stack:pop(), 'invalid size')) end
-        local function new_array(size)
-          return setmetatable({n = size}, {__len = function(t) return t.n end})
-        end
-        local function add_dimension(t, n)
-          if n > #dims then return end
-          for i = 1, #t do
-            t[i] = new_array(dims[n])
-            add_dimension(t[i], n + 1)
-          end
-        end
-        local t = new_array(dims[1])
-        if #dims > 1 then add_dimension(t, 2) end
-        stack:push(t)
-      end, --
-      [SETINDEX] = function()
-        local value = stack:pop()
-        local i = self:_assert_int(stack:pop(), 'invalid index')
-        local array = stack:pop()
-        assert(type(array) == 'table', 'cannot set index for non-array value')
-        print(SETINDEX, '<array>', i, value)
-        array[i] = value
-      end --
-    }, {{__index = function(_, opcode) error('unknown instruction: ' .. opcode) end}})
-
-    for opcode, f in pairs{
-      [ADD] = function(a, b) return a + b end, --
-      [SUB] = function(a, b) return a - b end, --
-      [MUL] = function(a, b) return a * b end, --
-      [DIV] = function(a, b) return a / b end, --
-      [MOD] = function(a, b) return a % b end, --
-      [POW] = function(a, b) return a^b end, --
-      [GTE] = function(a, b) return a >= b and 1 or 0 end, --
-      [GT] = function(a, b) return a > b and 1 or 0 end, --
-      [LTE] = function(a, b) return a <= b and 1 or 0 end, --
-      [LT] = function(a, b) return a < b and 1 or 0 end, --
-      [EQ] = function(a, b) return a == b and 1 or 0 end, --
-      [NE] = function(a, b) return a ~= b and 1 or 0 end --
-    } do
-      self._dispatch[opcode] = function()
-        local right, left = stack:pop(), stack:pop()
-        print(opcode, left, right)
-        stack:push(f(left, right))
+  -- Create a new dispatch table for each run since opcodes change per run.
+  self._dispatch = setmetatable({
+    [RET] = function() return true end, -- signal completion
+    [PUSH] = function()
+      local value = opcodes:next()
+      print(PUSH, value)
+      stack:push(value)
+    end, --
+    [LOAD] = function()
+      local id = opcodes:next()
+      print(LOAD, id)
+      stack:push(memory[id])
+    end, --
+    [STORE] = function()
+      local id = opcodes:next()
+      print(STORE, id)
+      memory[id] = stack:pop()
+    end, --
+    [PRINT] = function()
+      local value = stack:pop()
+      print(PRINT, value)
+      _print(type(value) ~= 'table' and value or pt.pt(value))
+    end, --
+    [CONCAT] = function()
+      local n = opcodes:next()
+      print(CONCAT, n)
+      if n > 1 then
+        local chunks = {}
+        for i = 1, n do table.insert(chunks, 1, stack:pop()) end
+        stack:push(table.concat(chunks))
+      elseif type(stack:top()) ~= 'string' then
+        stack:push(tostring(stack:pop())) -- interpolated expression result
       end
-    end
-
-    for opcode, f in pairs{
-      [UNM] = function(a) return -a end, --
-      [NOT] = function(a) return a == 0 and 1 or 0 end --
-    } do
-      self._dispatch[opcode] = function()
-        local value = stack:pop()
-        print(opcode, value)
-        stack:push(f(value))
+    end, --
+    [INDEX] = function()
+      local i = self:_assert_int(stack:pop(), 'invalid index')
+      print(INDEX, i)
+      local value, value_type = self:_assert_indexible(stack:pop())
+      assert(i <= #value, 'index out of range')
+      stack:push(value_type == 'string' and string.sub(value, i, i) or value[i])
+    end, --
+    [SUBSTR] = function()
+      local e = self:_assert_int(stack:pop(), 'invalid range end')
+      local s = self:_assert_int(stack:pop(), 'invalid range start')
+      print(SUBSTR, s, e)
+      local value, value_type = self:_assert_indexible(stack:pop())
+      stack:push(string.sub(value, s, e))
+    end, --
+    [NEW] = function()
+      local n = opcodes:next()
+      print(NEW, n)
+      local dims = {}
+      for i = 1, n do table.insert(dims, 1, self:_assert_int(stack:pop(), 'invalid size')) end
+      local function new_array(size)
+        return setmetatable({n = size}, {__len = function(t) return t.n end})
       end
-    end
-
-    for _, opcode in ipairs{JMP, JMPZ, JMPZP, JMPNZP} do
-      self._dispatch[opcode] = function()
-        local rel = opcodes:next()
-        print(opcode, rel)
-        local zero = stack:top() == 0
-        local jump = opcode == JMP or ((opcode == JMPZ or opcode == JMPZP) and zero) or
-          (opcode == JMPNZP and not zero)
-        local pop = opcode == JMPZ or (opcode == JMPZP and not zero) or (opcode == JMPNZP and zero)
-        if jump then opcodes:jump(rel) end
-        if pop then
-          print('pop') -- not an opcode, but verify pop operation
-          stack:pop()
+      local function add_dimension(t, n)
+        if n > #dims then return end
+        for i = 1, #t do
+          t[i] = new_array(dims[n])
+          add_dimension(t[i], n + 1)
         end
+      end
+      local t = new_array(dims[1])
+      if #dims > 1 then add_dimension(t, 2) end
+      stack:push(t)
+    end, --
+    [SETINDEX] = function()
+      local value = stack:pop()
+      local i = self:_assert_int(stack:pop(), 'invalid index')
+      local array = stack:pop()
+      assert(type(array) == 'table', 'cannot set index for non-array value')
+      print(SETINDEX, '<array>', i, value)
+      array[i] = value
+    end, --
+    [CALL] = function()
+      local id = opcodes:next()
+      print(CALL, id)
+      stack:push(self:run(opcodes:call(id)))
+    end, --
+    [POP] = function()
+      local n = opcodes:next()
+      print(POP, n)
+      for i = 1, n do stack:pop() end
+    end --
+  }, {{__index = function(_, opcode) error('unknown instruction: ' .. opcode) end}})
+
+  for opcode, f in pairs{
+    [ADD] = function(a, b) return a + b end, --
+    [SUB] = function(a, b) return a - b end, --
+    [MUL] = function(a, b) return a * b end, --
+    [DIV] = function(a, b) return a / b end, --
+    [MOD] = function(a, b) return a % b end, --
+    [POW] = function(a, b) return a^b end, --
+    [GTE] = function(a, b) return a >= b and 1 or 0 end, --
+    [GT] = function(a, b) return a > b and 1 or 0 end, --
+    [LTE] = function(a, b) return a <= b and 1 or 0 end, --
+    [LT] = function(a, b) return a < b and 1 or 0 end, --
+    [EQ] = function(a, b) return a == b and 1 or 0 end, --
+    [NE] = function(a, b) return a ~= b and 1 or 0 end --
+  } do
+    self._dispatch[opcode] = function()
+      local right, left = stack:pop(), stack:pop()
+      print(opcode, left, right)
+      stack:push(f(left, right))
+    end
+  end
+
+  for opcode, f in pairs{
+    [UNM] = function(a) return -a end, --
+    [NOT] = function(a) return a == 0 and 1 or 0 end --
+  } do
+    self._dispatch[opcode] = function()
+      local value = stack:pop()
+      print(opcode, value)
+      stack:push(f(value))
+    end
+  end
+
+  for _, opcode in ipairs{JMP, JMPZ, JMPZP, JMPNZP} do
+    self._dispatch[opcode] = function()
+      local rel = opcodes:next()
+      print(opcode, rel)
+      local zero = stack:top() == 0
+      local jump = opcode == JMP or ((opcode == JMPZ or opcode == JMPZP) and zero) or
+        (opcode == JMPNZP and not zero)
+      local pop = opcode == JMPZ or (opcode == JMPZP and not zero) or (opcode == JMPNZP and zero)
+      if jump then opcodes:jump(rel) end
+      if pop then
+        print('pop') -- not an opcode, but verify pop operation
+        stack:pop()
       end
     end
   end
@@ -539,6 +587,11 @@ function machine:run(opcodes)
   -- Execute instructions.
   local dispatch = self._dispatch
   while true do if dispatch[opcodes:next()]() then break end end
+
+  -- Sanity check that the list of given opcodes resulted in only one result to return.
+  -- (Multiple CALLs on the stack will result in more than 1 value on the stack, so this check
+  -- must be relative.)
+  assert(#stack == top + 1, 'mismanaged stack')
 
   return stack:pop()
 end
