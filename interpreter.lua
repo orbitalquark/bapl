@@ -217,12 +217,14 @@ function opcodes.new(ast)
   for _, func in ipairs(ast) do
     local codes = setmetatable({_functions = functions}, {__index = opcodes})
     if func.block then
+      assert(not functions[func.id] or #functions[func.id] == 0, 'function redefined: ' .. func.id)
       codes:_add_stat(func.block)
       -- Add implicit 'return 0' statement.
       codes:_add(PUSH, 0)
       codes:_add(RET)
     else
-      -- forward declaration
+      -- Forward declaration.
+      assert(not functions[func.id], 'function redeclared: ' .. func.id)
     end
     functions[func.id] = codes
   end
