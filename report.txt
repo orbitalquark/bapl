@@ -20,9 +20,10 @@ a) A case (switch) statement
   Implementation:
 
     Added a new 'switch' grammar rule and added it to the existing 'stat' rule for statements.
-    The rule looks for a 'switch' keyword and switch expression, and then it looks for zero
-    or more instances of 'case' followed by a case expression and block, and then an optional
-    'else' block.  The 'else' keyword was reused instead of reserving a new keyword like 'default'.
+    The rule looks for a new 'switch' keyword and switch expression, and then it looks for
+    zero or more instances of a new 'case' keyword followed by a case expression and block,
+    and then an optional 'else' block.  The 'else' keyword was reused instead of reserving a
+    new keyword like 'default'.
 
     Rather than having the parser create a new AST node to compile, it instead transforms
     a switch-case-else statement into an if-elseif-else statement and its corresponding AST
@@ -158,7 +159,7 @@ d) Substring extraction
     Added a new 'range' grammar rule as an alternative to the existing 'index' rule (which now
     recognizes strings in addition to arrays). That 'range' rule looks for one or more sequences
     of range of indices separated by a ':' token. The existing 'index' opcode and a new 'substr'
-    opcodes are used to perform the indexing and "substringing," respectively.
+    opcode is used to perform the indexing and "substringing," respectively.
 
     The parser produces a new 'range' node that contains 'start' and 'end' fields for substring
     expressions.
@@ -167,7 +168,7 @@ d) Substring extraction
     to load a given variable and obtain a substring from a position range.
 
     When the interpreter encounters the 'index' opcode, it performs a string index if the
-    variable's type is a string (as opposed to a table/array).  When it encounters the 'substr'
+    variable's type is a string (as opposed to a table/array). When it encounters the 'substr'
     opcode, it pops the substring range off the stack, verifies that it's composed of integers,
     pops the variable's value off the stack, verifies that it is a string, performs the substring
     operation, and then pushes the result onto the stack.
