@@ -265,7 +265,7 @@ end
 -- @param ... Optional value(s) for `op`, such as a number to push or variable to store or load.
 function opcodes:_add(op, ...)
   table.insert(self, (assert(op, 'attempt to add nil op')))
-  for _, value in ipairs({...}) do if value then table.insert(self, value) end end
+  for _, value in ipairs{...} do if value then table.insert(self, value) end end
 end
 
 -- Returns a numeric ID for the given variable, creating it if possible.
@@ -302,8 +302,9 @@ function opcodes:_add_expr(node)
     }
     local un_opcodes = {['-'] = UNM, ['!'] = NOT}
     local log_opcodes = {['and'] = JMPZP, ['or'] = JMPNZP}
+
     self._dispatch_add_expr = setmetatable({
-      number = function(self, node) self:_add(PUSH, node.value) end,
+      number = function(self, node) self:_add(PUSH, node.value) end, --
       variable = function(self, node)
         local index = self:_local_index(node.id)
         if index then
@@ -406,10 +407,6 @@ function opcodes:_add_stat(node)
           self:_add(SETINDEX)
         end
       end, --
-      ['local'] = function(self, node)
-        self:_add_expr(node.expr)
-        self._locals[#self._locals + 1] = node.id
-      end, --
       seq = function(self, node)
         self:_add_stat(node.left)
         self:_add_stat(node.right)
@@ -456,6 +453,10 @@ function opcodes:_add_stat(node)
         local num_added_locals = #self._locals - num_locals
         for i = 1, num_added_locals do table.remove(self._locals) end
         if num_added_locals > 0 then self:_add(POP, num_added_locals) end
+      end, --
+      ['local'] = function(self, node)
+        self:_add_expr(node.expr)
+        self._locals[#self._locals + 1] = node.id
       end --
     }, {__index = function(_, tag) error('unknown stat tag: ' .. tag) end})
   end
@@ -525,7 +526,6 @@ function machine:run(opcodes)
       local n = opcodes:next()
       print(RET, n)
       local value = stack:pop()
-      print('returned', value)
       for i = 1, n do stack:pop() end
       stack:push(value)
       return true -- signal completion
