@@ -315,5 +315,7 @@ ok, err = pcall(test_prog, 'function main(a) {}')
 assert(not ok and err:find('main cannot have a parameter list'))
 ok, err = pcall(test_prog, 'function foo(=1) {} function main() {}')
 assert(not ok and err:find('cannot have default value in function with no parameters'))
+ok, err = pcall(test_prog, 'function foo(x, x) {} function main() {}')
+assert(not ok and err:find('duplicate parameter in foo'))
 
 print('Passed')

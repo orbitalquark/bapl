@@ -247,7 +247,10 @@ function opcodes.new(ast)
         assert(#forward_decl._params == #func.params, 'parameter list mismatch for ' .. func.id)
       end
 
-      for i, name in ipairs(func.params) do codes._params[name] = i end -- for lookup by name
+      for i, name in ipairs(func.params) do
+        assert(not codes._params[name], 'duplicate parameter in ' .. func.id)
+        codes._params[name] = i -- for index lookup by name
+      end
       functions[func.id] = codes -- set this now so it can be called recursively
 
       codes:_add_stat(func.block)
