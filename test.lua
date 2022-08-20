@@ -40,15 +40,15 @@ test_expr('1+2')
 test_expr('2 - 1')
 test_expr('10/2')
 test_expr('1+2*3-4')
-test_expr('3%2')
-test_expr('2^3^4')
+test_expr('3%2') -- Exercise 2.9: % operator
+test_expr('2^3^4') -- Exercise 2.9: ^ operator
 test_expr('1000/10/10')
 
 -- Test parenthesized expressions.
 test_expr('(1+2)*(3+4)')
 test_expr(' ( 1 + 2 ) * ( 3 / 4 ) ')
 
--- Test unary minus.
+-- Test unary minus. Exercise 2.11.
 test_expr('-1')
 test_expr('-10.50')
 test_expr('- -1')
@@ -59,7 +59,7 @@ test_expr('-(1-2)*-3*(4/5)')
 test_expr('-2^2')
 test_expr('2^-2')
 
--- Test comparisons.
+-- Test comparisons. Exercise 2.11.
 test_expr('1==1', 1)
 test_expr('1!=1', 0)
 test_expr('1+2<3*4', 1)
@@ -68,7 +68,7 @@ test_expr('2^2>2^2', 0)
 test_expr('1*2>=8/4', 1)
 test_expr('1!=-1==1', 1)
 
--- Test unary not.
+-- Test unary not. Exercise 5.2.
 test_expr('!1', 0)
 test_expr('!2', 0)
 test_expr('!!1', 1)
@@ -89,9 +89,9 @@ test_stat([[
 x = 1;
 y = 2;
 return x + y]], 3)
-test_stat('{};;{;;};{ { } };', 0) -- empty blocks and statements
+test_stat('{};;{;;};{ { } };', 0) -- Exercise 3.5: empty blocks and statements
 
--- Test print statement.
+-- Test print statement. Exercise 3.7.
 test_stat('@(2*2)', 0)
 test_stat('x=-(2*2);@x', 0)
 
@@ -99,21 +99,21 @@ test_stat('x=-(2*2);@x', 0)
 local ok, err = pcall(test_stat, 'return 1+y')
 assert(not ok and err:find('undefined variable: y'), 'expected "undefined variable: y"')
 
--- Test syntax error.
+-- Test syntax error. Exercise 4.5: error messages with line numbers.
 ok, err = pcall(test_stat, 'oops!')
-assert(not ok and err:find('syntax error at line 2, col 5')) -- TODO: was line 1 prior to function main() { ... }
+assert(not ok and err:find('syntax error at line 2, col 5')) -- NOTE: was line 1 prior to function main() { ... }
 ok, err = pcall(test_stat, [[
 x = 1;
 oops!]])
-assert(not ok and err:find('syntax error at line 3, col 5')) -- TODO: was line 2 prior to function main() { ... }
+assert(not ok and err:find('syntax error at line 3, col 5')) -- NOTE: was line 2 prior to function main() { ... }
 ok, err = pcall(test_stat, [[
 x = 1;
 y = 2
 return x + y
 ]])
-assert(not ok and err:find('syntax error at line 3, col 6')) -- TODO: was line 2 prior to function main() { ... }
+assert(not ok and err:find('syntax error at line 3, col 6')) -- NOTE: was line 2 prior to function main() { ... }
 
--- Test comments.
+-- Test comments. Exercise 4.7: block comments.
 test_stat([[
 #{comment
 comment#}
@@ -144,7 +144,7 @@ if a == 0 {
   return 2
 } else {
   return 3
-}]], 3)
+}]], 3) -- Exercise 5.8: elseif
 test_stat(
   'if 0 { if 1 { return 1 } else { return 2 } } else { if 1 { return 3 } else { return 4} }', 3)
 test_stat('if 1 {} else {return 1}', 0)
@@ -160,7 +160,7 @@ while i {
 };
 return factorial]], 720)
 
--- Test logical operators.
+-- Test logical operators. Exercise 5.10.
 test_expr('4 and 5')
 test_expr('0 and 3', 0)
 test_expr('0 or 10', 10)
@@ -238,9 +238,9 @@ assert(not ok and err:find('index out of range'))
 
 -- Test arrays.
 test_stat('x=new[10];x[1]=2;x[2]=x[1];return x[2]', 2)
-test_stat('x=new[3];x[1]=1;x[2]=2;x[3]=3;@x', 0)
+test_stat('x=new[3];x[1]=1;x[2]=2;x[3]=3;@x', 0) -- Exercise 6.8: printing arrays
 test_stat('x=new[1];x[1]=new[2];x[1][2]=3;return x[1][2]', 3)
-test_stat('x=new[1][2][3];x[1][2][2]=122;return x[1][2][2]', 122)
+test_stat('x=new[1][2][3];x[1][2][2]=122;return x[1][2][2]', 122) -- Exercise 6.11: multidimensional new
 ok, err = pcall(test_stat, 'x=new[1/2]')
 assert(not ok and err:find('invalid size'))
 ok, err = pcall(test_stat, 'x=new[1];return x[2]')
@@ -256,7 +256,7 @@ test_prog([[
 function foo();
 function bar() { return foo() }
 function foo() { return 1 }
-function main() { return bar() }]], 1)
+function main() { return bar() }]], 1) -- Exercise 7.9: forward declarations
 test_prog([[
 function foo() { return 1 }
 function main() { foo(); return foo() }]], 1)
@@ -301,9 +301,6 @@ function fact(n) {
 }
 function main() { return fact(6) }
 ]], 720)
-test_prog('function foo(x=1) { return x } function main() { return foo() }', 1)
-test_prog('function foo(x=1) { return x } function main() { return foo(2) }', 2)
-test_prog('function foo(y=1+1) { return y } function main() { return foo() }', 2)
 
 ok, err = pcall(test_prog, 'function foo(a) {} function main() { return foo() }')
 assert(not ok and err:find('wrong number of arguments to foo'))
@@ -317,5 +314,10 @@ ok, err = pcall(test_prog, 'function foo(=1) {} function main() {}')
 assert(not ok and err:find('cannot have default value in function with no parameters'))
 ok, err = pcall(test_prog, 'function foo(x, x) {} function main() {}')
 assert(not ok and err:find('duplicate parameter in foo'))
+
+-- Test default argument. Exercise 8.11.
+test_prog('function foo(x=1) { return x } function main() { return foo() }', 1)
+test_prog('function foo(x=1) { return x } function main() { return foo(2) }', 2)
+test_prog('function foo(y=1+1) { return y } function main() { return foo() }', 2)
 
 print('Passed')
