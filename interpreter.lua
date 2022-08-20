@@ -40,7 +40,7 @@ function grammar:parse(input)
       return {tag = tag, variable = variable, expr = expr, expr2 = expr2}
     end
     -- Folded version of node().
-    function fnode(tag, patt)
+    local function fnode(tag, patt)
       return Cf(patt, function(...)
         return tag:find('op$') and binop_node(tag, ...) or index_node(tag, ...)
       end)
@@ -48,7 +48,7 @@ function grammar:parse(input)
     -- Folds an if-elseif-else statement, with elseif being optional.
     -- if {...} elseif {...} is transformed into if {...} else { if {...} }.
     -- Note: an if by itself does not need folding.
-    function fold_if(node, new)
+    local function fold_if(node, new)
       local if_node = node
       while if_node.block_else do if_node = if_node.block_else end
       if new.tag == 'else' then new = new.block end
@@ -59,7 +59,7 @@ function grammar:parse(input)
     -- switch expr; case x {...} case y {...} is transformed into
     -- if expr == x {...} else { if expr == y {...} }.
     -- Note: a switch by itself does not need folding; it is a no-op.
-    function fold_switch(node, new)
+    local function fold_switch(node, new)
       if new.expr then new.expr = binop_node('binop', node.expr, '==', new.expr) end
       if not node.if_node then
         if new.tag == 'else' then new = new.block end
@@ -69,6 +69,8 @@ function grammar:parse(input)
       end
       return node
     end
+    -- Version of field() that produces a CSV list.
+    local function lfield(name, patt) return Cg(Ct((patt * (token(',') * patt)^0)^-1), name) end
 
     self._grammar = P{
       V('reset_pos') * Ct(V('func')^1) * -1,
@@ -80,7 +82,7 @@ function grammar:parse(input)
       -- Basic patterns.
       identifier = C(Cmt((alpha + '_') * (alnum + '_')^0, function(_, _, word)
         if reserved_words[word] then return false end
-        return true, word
+        return true
       end)) * space, --
       variable = node('variable', field('id', V('identifier'))), --
       hex_num = '0' * S('xX') * xdigit^1,
@@ -107,7 +109,8 @@ function grammar:parse(input)
         V('variable') *
           Cg(token('[') * (V('expr') + node('number', field('value', Cc(1)))) * token(':') *
             (V('expr') + node('number', field('value', Cc(-1)))) * token(']'))^1),
-      call = node('call', field('id', V('identifier')) * token('(') * token(')')),
+      call = node('call', field('id', V('identifier')) * token('(') * lfield('args', V('expr')) *
+        token(')')), --
       parens = token('(') * V('expr') * token(')'),
       unary = node('unop', field('op', op(S('-!'))) * field('expr', V('exp'))),
       exp = node('binop',
@@ -122,15 +125,14 @@ function grammar:parse(input)
       expr = V('lor'),
 
       -- Statements.
-      func = node('func',
-        reserved('function') * field('id', V('identifier')) * token('(') * token(')') *
-          (field('block', V('block')) + ';')), --
       block = node('block', field('block', token('{') * (V('stats') + node('empty', token(';')^0)) *
         token('}'))),
       stats = node('seq', field('left', V('stat')) * (token(';')^1 * field('right', V('stats')))) +
         V('stat') * token(';')^-1,
-      stat = V('block') + V('if') + V('switch') + V('while') + V('call') + V('assign') + V('print') +
-        V('return'),
+      stat = V('block') + V('local') + V('if') + V('switch') + V('while') + V('call') + V('assign') +
+        V('print') + V('return'), --
+      ['local'] = node('local', reserved('var') * field('id', V('identifier')) *
+        field('expr', token('=') * V('expr') + node('number', field('value', Cc(0))))), --
       ['if'] = Cf(
         node('if', reserved('if') * field('expr', V('expr')) * field('block', V('block'))) *
           node('if', reserved('elseif') * field('expr', V('expr')) * field('block', V('block')))^0 *
@@ -145,6 +147,11 @@ function grammar:parse(input)
       print = node('print', token('@') * field('expr', V('expr'))),
       ['return'] = node('return', reserved('return') * field('expr', V('expr'))),
 
+      -- Functions.
+      func = node('func', reserved('function') * field('id', V('identifier')) * token('(') *
+        lfield('params', V('identifier')) * (token('=') * field('default', V('expr')))^-1 *
+        token(')') * (field('block', V('block')) + ';')), --
+      
       -- Utility.
       reset_pos = P(function()
         self._max_pos = 0
@@ -203,6 +210,8 @@ local NEW = 'new'
 local SETINDEX = 'setindex'
 local CALL = 'call'
 local POP = 'pop'
+local LOADL = 'loadl'
+local STOREL = 'storel'
 
 -- List of opcodes for a stack machine.
 local opcodes = {}
@@ -215,19 +224,39 @@ local opcodes = {}
 function opcodes.new(ast)
   local functions = {}
   for _, func in ipairs(ast) do
-    local codes = setmetatable({_functions = functions}, {__index = opcodes})
-    if func.block then
-      assert(not functions[func.id] or #functions[func.id] == 0, 'function redefined: ' .. func.id)
+    if func.id == 'main' then assert(#func.params == 0, 'main cannot have a parameter list') end
+    if func.default then -- TODO: make this a syntax error
+      assert(#func.params > 0, 'cannot have default value in function with no parameters')
+    end
+
+    local codes = setmetatable({
+      _functions = functions, -- reference to all defined functions
+      _params = func.params, -- this function's parameter map
+      _default = func.default, -- the default value of the last parameter (if any)
+      _locals = {} -- currently defined local variables
+    }, {__index = opcodes})
+
+    if not func.block then
+      -- Forward declaration.
+      assert(not functions[func.id], 'function redeclared: ' .. func.id)
+      functions[func.id] = codes
+    else
+      local forward_decl = functions[func.id]
+      if forward_decl then
+        assert(#forward_decl == 0, 'function redefined: ' .. func.id)
+        assert(#forward_decl._params == #func.params, 'parameter list mismatch for ' .. func.id)
+      end
+
+      for i, name in ipairs(func.params) do codes._params[name] = i end -- for lookup by name
+      functions[func.id] = codes -- set this now so it can be called recursively
+
       codes:_add_stat(func.block)
       -- Add implicit 'return 0' statement.
       codes:_add(PUSH, 0)
-      codes:_add(RET)
-    else
-      -- Forward declaration.
-      assert(not functions[func.id], 'function redeclared: ' .. func.id)
+      codes:_add(RET, #codes._params + #codes._locals)
     end
-    functions[func.id] = codes
   end
+
   return assert(functions.main, 'no main function')
 end
 
@@ -253,6 +282,16 @@ function opcodes:_variable_id(id, can_create)
   return (assert(self._vars[id], 'undefined variable: ' .. id))
 end
 
+-- Returns the stack index of the given local variable or parameter, or nil if none was found.
+-- Parameters exist at negative stack indices, which are relative to the stack top at the
+-- beginning of a function call.
+-- @param id Local variable or parameter to fetch a stack index for.
+function opcodes:_local_index(id)
+  for i = #self._locals, 1, -1 do if id == self._locals[i] then return i end end
+  local i = self._params[id]
+  return i and -(#self._params - i) or nil
+end
+
 -- Adds the opcodes for the given expression node to the list.
 -- @param node Abstract syntax tree node of the expression to add.
 function opcodes:_add_expr(node)
@@ -265,7 +304,14 @@ function opcodes:_add_expr(node)
     local log_opcodes = {['and'] = JMPZP, ['or'] = JMPNZP}
     self._dispatch_add_expr = setmetatable({
       number = function(self, node) self:_add(PUSH, node.value) end,
-      variable = function(self, node) self:_add(LOAD, self:_variable_id(node.id)) end,
+      variable = function(self, node)
+        local index = self:_local_index(node.id)
+        if index then
+          self:_add(LOADL, index)
+        else
+          self:_add(LOAD, self:_variable_id(node.id))
+        end
+      end, --
       binop = function(self, node)
         self:_add_expr(node.left)
         self:_add_expr(node.right)
@@ -307,7 +353,12 @@ function opcodes:_add_expr(node)
         self:_add(NEW, #node)
       end, --
       call = function(self, node)
-        assert(self._functions[node.id], 'undeclared function: ' .. node.id)
+        local func = assert(self._functions[node.id], 'undeclared function: ' .. node.id)
+        if #node.args < #func._params and func._default then
+          node.args[#node.args + 1] = func._default
+        end
+        assert(#func._params == #node.args, 'wrong number of arguments to ' .. node.id)
+        for _, expr in ipairs(node.args) do self:_add_expr(expr) end
         self:_add(CALL, node.id)
       end --
     }, {__index = function(_, tag) error('unknown expr tag: ' .. tag) end})
@@ -342,13 +393,22 @@ function opcodes:_add_stat(node)
       assign = function(self, node)
         if node.variable.tag ~= 'index' then
           self:_add_expr(node.expr)
-          self:_add(STORE, self:_variable_id(node.variable.id, true))
+          local index = self:_local_index(node.variable.id)
+          if index then
+            self_add(STOREL, index)
+          else
+            self:_add(STORE, self:_variable_id(node.variable.id, true))
+          end
         else
           self:_add_expr(node.variable.variable)
           self:_add_expr(node.variable.expr)
           self:_add_expr(node.expr)
           self:_add(SETINDEX)
         end
+      end, --
+      ['local'] = function(self, node)
+        self:_add_expr(node.expr)
+        self._locals[#self._locals + 1] = node.id
       end, --
       seq = function(self, node)
         self:_add_stat(node.left)
@@ -360,7 +420,7 @@ function opcodes:_add_stat(node)
       end, --
       ['return'] = function(self, node)
         self:_add_expr(node.expr)
-        self:_add(RET)
+        self:_add(RET, #self._params + #self._locals)
       end, --
       ['if'] = function(self, node)
         self:_add_expr(node.expr)
@@ -390,7 +450,13 @@ function opcodes:_add_stat(node)
         self:_add(CALL, node.id)
         self:_add(POP, 1)
       end, --
-      block = function(self, node) self:_add_stat(node.block) end --
+      block = function(self, node)
+        local num_locals = #self._locals
+        self:_add_stat(node.block)
+        local num_added_locals = #self._locals - num_locals
+        for i = 1, num_added_locals do table.remove(self._locals) end
+        if num_added_locals > 0 then self:_add(POP, num_added_locals) end
+      end --
     }, {__index = function(_, tag) error('unknown stat tag: ' .. tag) end})
   end
   self._dispatch_add_stat[node.tag](self, node)
@@ -405,13 +471,15 @@ function opcodes:next()
 end
 
 ---
--- Returns the list of opcodes for the given function.
--- The stack machine can then run the returned codes, effectively calling the function.
-function opcodes:call(id)
-  local opcodes = assert(self._functions[id], 'undeclared function: ' .. id)
-  assert(#opcodes > 0, 'undefined function: ' .. id)
-  if opcodes.i then opcodes.i = 0 end -- reset
-  return opcodes
+-- Calls the given Lua function with the list of opcodes for the named function in the language,
+-- effectively calling that latter function.
+function opcodes:call(id, f)
+  local fopcodes = assert(self._functions[id], 'undeclared function: ' .. id)
+  assert(#fopcodes > 0, 'undefined function: ' .. id)
+  local i = fopcodes.i
+  fopcodes.i = 0 -- reset
+  f(fopcodes)
+  fopcodes.i = i -- restore
 end
 
 ---
@@ -449,11 +517,19 @@ function machine:run(opcodes)
   if not self._memory then self._memory = {} end
   if not self._stack then self._stack = stack.new() end
   local memory, stack = self._memory, self._stack
-  local top = #stack -- store for later sanity check that CALLs have not mismanaged the stack
+  local base = #stack -- during a CALL, arguments are below this index
 
   -- Create a new dispatch table for each run since opcodes change per run.
   self._dispatch = setmetatable({
-    [RET] = function() return true end, -- signal completion
+    [RET] = function()
+      local n = opcodes:next()
+      print(RET, n)
+      local value = stack:pop()
+      print('returned', value)
+      for i = 1, n do stack:pop() end
+      stack:push(value)
+      return true -- signal completion
+    end, --
     [PUSH] = function()
       local value = opcodes:next()
       print(PUSH, value)
@@ -529,12 +605,22 @@ function machine:run(opcodes)
     [CALL] = function()
       local id = opcodes:next()
       print(CALL, id)
-      stack:push(self:run(opcodes:call(id)))
+      opcodes:call(id, function(opcodes) self:run(opcodes) end)
     end, --
     [POP] = function()
       local n = opcodes:next()
       print(POP, n)
       for i = 1, n do stack:pop() end
+    end, --
+    [LOADL] = function()
+      local index = opcodes:next()
+      print(LOADL, index)
+      stack:push(stack[base + index])
+    end, --
+    [STOREL] = function()
+      local index = opcodes:next()
+      print(STOREL, index)
+      stack[base + index] = stack:pop()
     end --
   }, {{__index = function(_, opcode) error('unknown instruction: ' .. opcode) end}})
 
@@ -590,12 +676,7 @@ function machine:run(opcodes)
   local dispatch = self._dispatch
   while true do if dispatch[opcodes:next()]() then break end end
 
-  -- Sanity check that the list of given opcodes resulted in only one result to return.
-  -- (Multiple CALLs on the stack will result in more than 1 value on the stack, so this check
-  -- must be relative.)
-  assert(#stack == top + 1, 'mismanaged stack')
-
-  return stack:pop()
+  return stack:top()
 end
 
 -- Asserts the given value is an integer type and returns that value.

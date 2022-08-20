@@ -276,4 +276,44 @@ assert(not ok and err:find('undefined function: foo'))
 ok, err = pcall(test_prog, 'function foo(); function foo(); function main() {}')
 assert(not ok and err:find('function redeclared: foo'))
 
+-- Test local variables.
+test_stat('var x = 1; return x', 1)
+test_stat('{var x = 1; return x}', 1)
+test_stat('var x = 1; {var x = 2; return x}', 2)
+test_stat('var x = 1; {var x = 2}; return x', 1)
+test_stat('x = 1; {var x = 2; return x}', 2)
+test_stat('x = 1; {var x = 2}; return x', 1)
+test_stat('var x = 1; {var y = 2; {var z = 3; return x + y + z}}', 6)
+test_stat('var x; return x+1', 1) -- default initializer
+
+-- Test function arguments.
+test_prog([[
+function foo(x, y) { return x + y }
+function main() { return foo(1, 2) }
+]], 3)
+test_prog([[
+function fact(n) {
+  if n {
+    return n * fact(n - 1)
+  } else {
+    return 1
+  }
+}
+function main() { return fact(6) }
+]], 720)
+test_prog('function foo(x=1) { return x } function main() { return foo() }', 1)
+test_prog('function foo(x=1) { return x } function main() { return foo(2) }', 2)
+test_prog('function foo(y=1+1) { return y } function main() { return foo() }', 2)
+
+ok, err = pcall(test_prog, 'function foo(a) {} function main() { return foo() }')
+assert(not ok and err:find('wrong number of arguments to foo'))
+ok, err = pcall(test_prog, 'function foo() {} function main() { return foo(1) }')
+assert(not ok and err:find('wrong number of arguments to foo'))
+ok, err = pcall(test_prog, 'function foo(); function foo(a) {} function main() {}')
+assert(not ok and err:find('parameter list mismatch for foo'))
+ok, err = pcall(test_prog, 'function main(a) {}')
+assert(not ok and err:find('main cannot have a parameter list'))
+ok, err = pcall(test_prog, 'function foo(=1) {} function main() {}')
+assert(not ok and err:find('cannot have default value in function with no parameters'))
+
 print('Passed')
