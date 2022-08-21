@@ -310,14 +310,19 @@ ok, err = pcall(test_prog, 'function foo(); function foo(a) {} function main() {
 assert(not ok and err:find('parameter list mismatch for foo'))
 ok, err = pcall(test_prog, 'function main(a) {}')
 assert(not ok and err:find('main cannot have a parameter list'))
-ok, err = pcall(test_prog, 'function foo(=1) {} function main() {}')
-assert(not ok and err:find('cannot have default value in function with no parameters'))
 ok, err = pcall(test_prog, 'function foo(x, x) {} function main() {}')
 assert(not ok and err:find('duplicate parameter in foo'))
 
 -- Test default argument. Exercise 8.11.
 test_prog('function foo(x=1) { return x } function main() { return foo() }', 1)
 test_prog('function foo(x=1) { return x } function main() { return foo(2) }', 2)
-test_prog('function foo(y=1+1) { return y } function main() { return foo() }', 2)
+test_prog('function foo(x, y=1+1) { return y } function main() { return foo(1) }', 2)
+
+ok, err = pcall(test_prog, 'function foo(x, y=1) {} function main() { return foo() }')
+assert(not ok and err:find('wrong number of arguments to foo'))
+ok, err = pcall(test_prog, 'function foo(x=1, y=2) {} function main() {}')
+assert(not ok and err:find('syntax error'))
+ok, err = pcall(test_prog, 'function foo(=1) {} function main() {}')
+assert(not ok and err:find('cannot have default value in function with no parameters'))
 
 print('Passed')
